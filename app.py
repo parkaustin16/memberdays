@@ -740,6 +740,11 @@ def main() -> None:
             _label = st.session_state.get("last_selected_label", selected_label)
             _m = st.session_state.get("last_mode", mode)
             with st.spinner("Uploading…"):
+                # Show which base/table we're targeting so misconfiguration is obvious
+                _at_base = _secret("AIRTABLE_BASE_ID", "")
+                _at_table = _secret("AIRTABLE_TABLE_NAME", "memberdays")
+                st.caption(f"Airtable target → base: `{_at_base}` · table: `{_at_table}`")
+
                 _capture_url = None
                 if all([_secret("CLOUDINARY_CLOUD_NAME"), _secret("CLOUDINARY_API_KEY"), _secret("CLOUDINARY_API_SECRET")]):
                     try:
