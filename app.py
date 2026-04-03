@@ -679,19 +679,19 @@ def main() -> None:
             try:
                 output_path = capture_full_page(target_url, selected_code, mode)
                 status.update(label="Capture complete", state="complete")
-                # Persist so the upload button can access it across reruns
                 st.session_state["last_output_path"] = output_path
                 st.session_state["last_subsidiary_code"] = selected_code
                 st.session_state["last_selected_label"] = selected_label
                 st.session_state["last_mode"] = mode
+                st.session_state["airtable_status"] = None  # reset previous upload status
             except Exception as exc:
                 status.update(label="Capture failed", state="error")
                 st.error(f"Capture failed: {exc}")
                 return
 
-        output_path = st.session_state.get("last_output_path", output_path)
-
-        # Read pixel dimensions from PNG header without opening the full image
+    # Show results UI whenever a captured file exists in session state
+    output_path = st.session_state.get("last_output_path")
+    if output_path and os.path.exists(output_path):
         import struct
         with open(output_path, "rb") as _f:
             _raw = _f.read()
@@ -699,7 +699,6 @@ def main() -> None:
         _h = struct.unpack(">I", _raw[20:24])[0]
         _mb = len(_raw) / 1024 / 1024
 
-        # Shared pink style for both action buttons
         _airtable_configured = bool(_secret("AIRTABLE_API_KEY")) and bool(_secret("AIRTABLE_BASE_ID"))
         st.markdown(
             """
@@ -749,16 +748,23 @@ def main() -> None:
                         st.warning(f"Cloudinary upload skipped: {_e}")
                 try:
                     _record_id = save_to_airtable(_sub, _label, _m, _capture_url)
-                    st.success(f"✅ Saved to Airtable (record: {_record_id})")
+                    st.session_state["airtable_status"] = ("success", f"✅ Saved to Airtable (record: {_record_id})")
                 except Exception as _e:
                     _err_detail = str(_e)
-                    # pyairtable wraps HTTP errors — try to surface the response body
                     if hasattr(_e, "response") and _e.response is not None:
                         try:
                             _err_detail = _e.response.json()
                         except Exception:
                             _err_detail = _e.response.text
-                    st.error(f"Airtable upload failed: {_err_detail}")
+                    st.session_state["airtable_status"] = ("error", f"Airtable upload failed: {_err_detail}")
+
+        # Show persistent upload status
+        _at_status = st.session_state.get("airtable_status")
+        if _at_status:
+            if _at_status[0] == "success":
+                st.success(_at_status[1])
+            else:
+                st.error(_at_status[1])
 
         st.subheader("Screenshot")
         st.caption(f"Resolution: **{_w:,} × {_h:,} px** &nbsp;|&nbsp; File size: **{_mb:.1f} MB**")
