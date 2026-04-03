@@ -329,6 +329,8 @@ def save_to_airtable(
 
     Table columns: Name, domain, country, period, banner-type, capture
     """
+    from pyairtable import Api as AirtableApi
+
     api_key = _secret("AIRTABLE_API_KEY")
     base_id = _secret("AIRTABLE_BASE_ID")
     table_name = _secret("AIRTABLE_TABLE_NAME", "memberdays")
@@ -352,12 +354,10 @@ def save_to_airtable(
     if capture_url:
         fields["capture"] = [{"url": capture_url}]
 
-    url = f"https://api.airtable.com/v0/{base_id}/{table_name}"
-    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-
-    resp = requests.post(url, json={"fields": fields}, headers=headers, verify=False)
-    resp.raise_for_status()
-    return resp.json().get("id")
+    api = AirtableApi(api_key)
+    table = api.table(base_id, table_name)
+    record = table.create(fields)
+    return record["id"]
 
 
 def page_cleanup(page) -> None:
@@ -751,7 +751,14 @@ def main() -> None:
                     _record_id = save_to_airtable(_sub, _label, _m, _capture_url)
                     st.success(f"✅ Saved to Airtable (record: {_record_id})")
                 except Exception as _e:
-                    st.error(f"Airtable upload failed: {_e}")
+                    _err_detail = str(_e)
+                    # pyairtable wraps HTTP errors — try to surface the response body
+                    if hasattr(_e, "response") and _e.response is not None:
+                        try:
+                            _err_detail = _e.response.json()
+                        except Exception:
+                            _err_detail = _e.response.text
+                    st.error(f"Airtable upload failed: {_err_detail}")
 
         st.subheader("Screenshot")
         st.caption(f"Resolution: **{_w:,} × {_h:,} px** &nbsp;|&nbsp; File size: **{_mb:.1f} MB**")
