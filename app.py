@@ -329,14 +329,28 @@ def save_to_airtable(
 
     Table columns: Name, domain, country, period, banner-type, capture
     """
-    from pyairtable import Api as AirtableApi
-
     api_key = _secret("AIRTABLE_API_KEY")
     base_id = _secret("AIRTABLE_BASE_ID")
-    table_name = _secret("AIRTABLE_TABLE_NAME", "memberdays")
+    table_name = _secret("AIRTABLE_TABLE_NAME", "MemDays")
 
     if not all([api_key, base_id]):
         return None
+
+    token_hint = f"{api_key[:8]}..." if api_key else "missing"
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+
+    # Pre-flight: verify the token can read this base/table before writing
+    test_url = f"https://api.airtable.com/v0/{base_id}/{requests.utils.quote(table_name)}?maxRecords=1"
+    test_resp = requests.get(test_url, headers=headers)
+    if not test_resp.ok:
+        try:
+            err_body = test_resp.json()
+        except Exception:
+            err_body = test_resp.text
+        raise RuntimeError(
+            f"Pre-flight check failed (token: {token_hint}, base: {base_id}, table: {table_name!r}) "
+            f"→ HTTP {test_resp.status_code}: {err_body}"
+        )
 
     country_name = country_label.split(" (")[0]
     mode_suffix = "pc" if mode == "desktop" else "mo"
@@ -354,10 +368,15 @@ def save_to_airtable(
     if capture_url:
         fields["capture"] = [{"url": capture_url}]
 
-    api = AirtableApi(api_key)
-    table = api.table(base_id, table_name)
-    record = table.create(fields)
-    return record["id"]
+    post_url = f"https://api.airtable.com/v0/{base_id}/{requests.utils.quote(table_name)}"
+    resp = requests.post(post_url, json={"fields": fields}, headers=headers)
+    if not resp.ok:
+        try:
+            err_body = resp.json()
+        except Exception:
+            err_body = resp.text
+        raise RuntimeError(f"HTTP {resp.status_code}: {err_body}")
+    return resp.json().get("id")
 
 
 def page_cleanup(page) -> None:
