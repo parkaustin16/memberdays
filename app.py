@@ -594,19 +594,21 @@ def capture_full_page(url: str, subsidiary_code: str, mode: str) -> str:
 
                 page_cleanup(page)
 
-                # Scroll in Python-controlled steps so each section has time to load
-                total_height = page.evaluate("document.body.scrollHeight")
+                # Scroll in Python-controlled steps to trigger lazy-loaded sections.
+                # Cap at the initial height to avoid chasing dynamically injected content.
+                initial_height = page.evaluate("document.body.scrollHeight")
                 viewport_h = page.evaluate("window.innerHeight")
                 step = int(viewport_h * 0.8)
                 pos = 0
-                while pos < total_height:
+                max_iterations = 40  # hard cap ~32 viewports
+                iterations = 0
+                while pos < initial_height and iterations < max_iterations:
                     page.evaluate(f"window.scrollTo(0, {pos})")
                     time.sleep(0.4)
-                    # Update total height in case new content was injected
-                    total_height = page.evaluate("document.body.scrollHeight")
                     pos += step
+                    iterations += 1
 
-                # Wait for all network requests triggered by scrolling to finish
+                # Wait for network requests triggered by scrolling to finish
                 try:
                     page.wait_for_load_state("networkidle", timeout=25000)
                 except Exception:
