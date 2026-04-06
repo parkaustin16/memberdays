@@ -587,28 +587,95 @@ def capture_full_page(url: str, subsidiary_code: str, mode: str) -> str:
 
                 page_cleanup(page)
 
-                # Wait for all network activity to settle so images are fully loaded
+                # === FULL-PAGE LAZY-LOAD PIPELINE ===
+                # 1. Initial networkidle wait
                 try:
                     page.wait_for_load_state("networkidle", timeout=15000)
                 except Exception:
-                    pass  # Proceed even if some requests never settle
+                    pass
 
-                # Force all images to render at crisp full resolution
+                # 2. Measure initial page height
+                initial_height = page.evaluate(
+                    "() => Math.max(document.body.scrollHeight, document.documentElement.scrollHeight)"
+                )
+                viewport_h = page.evaluate("() => window.innerHeight || 1080")
+
+                # 3. Slow scroll through the entire page to trigger intersection observers.
+                #    Use half-viewport steps with 0.6s pause — gives each section time to
+                #    fire its lazy-load and start image downloads before we move past it.
+                step = max(int(viewport_h * 0.5), 300)
+                pos = 0
+                max_pos = int(initial_height * 1.05)  # allow 5% growth, no more
+                while pos < max_pos:
+                    page.evaluate(f"window.scrollTo(0, {pos})")
+                    time.sleep(0.6)
+                    pos += step
+
+                # 4. Sit at the bottom briefly for any final section triggers
+                page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                time.sleep(1)
+
+                # 5. Force every lazy image to eager and swap data-src attributes
                 page.evaluate("""
                     () => {
-                        document.querySelectorAll('img').forEach(img => {
-                            img.style.imageRendering = 'auto';
-                            img.decoding = 'sync';
-                            if (img.loading === 'lazy') {
-                                img.loading = 'eager';
-                                const src = img.src;
-                                img.src = '';
-                                img.src = src;
-                            }
+                        document.querySelectorAll('img, source, video').forEach(el => {
+                            if ('loading' in el) el.loading = 'eager';
+                            ['data-src', 'data-lazy-src', 'data-original'].forEach(attr => {
+                                const val = el.getAttribute(attr);
+                                if (val && !el.getAttribute('src')) el.setAttribute('src', val);
+                            });
+                            ['data-srcset', 'data-lazy-srcset'].forEach(attr => {
+                                const val = el.getAttribute(attr);
+                                if (val && !el.getAttribute('srcset')) el.setAttribute('srcset', val);
+                            });
                         });
                     }
                 """)
-                time.sleep(0.5)
+
+                # 6. Wait for all in-flight image downloads to finish
+                try:
+                    page.wait_for_load_state("networkidle", timeout=20000)
+                except Exception:
+                    pass
+
+                # 7. Explicitly wait for every <img> to be .complete
+                page.evaluate("""
+                    async () => {
+                        const imgs = Array.from(document.images);
+                        await Promise.all(imgs.map(img => {
+                            if (img.complete) return Promise.resolve();
+                            return new Promise(resolve => {
+                                img.addEventListener('load', resolve, {once: true});
+                                img.addEventListener('error', resolve, {once: true});
+                                setTimeout(resolve, 8000);
+                            });
+                        }));
+                    }
+                """)
+
+                # 8. Scroll back to top, let layout settle
+                page.evaluate("window.scrollTo(0, 0)")
+                time.sleep(3)
+
+                # 9. Second pass scroll (fast) — catches anything the first pass missed
+                final_height = page.evaluate(
+                    "() => Math.max(document.body.scrollHeight, document.documentElement.scrollHeight)"
+                )
+                fast_step = max(int(viewport_h * 0.9), 500)
+                pos = 0
+                while pos < final_height:
+                    page.evaluate(f"window.scrollTo(0, {pos})")
+                    time.sleep(0.15)
+                    pos += fast_step
+
+                # 10. Final networkidle + image wait
+                try:
+                    page.wait_for_load_state("networkidle", timeout=15000)
+                except Exception:
+                    pass
+
+                page.evaluate("window.scrollTo(0, 0)")
+                time.sleep(2)
 
                 if is_access_denied_page(page):
                     debug_base = os.path.join(debug_dir, f"{subsidiary_code}_{mode}_{profile['name']}_{timestamp}")
