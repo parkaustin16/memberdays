@@ -407,17 +407,21 @@ def capture_full_page(url: str, subsidiary_code: str, mode: str) -> str:
         device_scale_factor = 2
         is_mobile = True
         user_agent = (
-            "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
-            "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
+            "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/121.0.0.0 Mobile Safari/537.36"
         )
+        sec_ch_ua_mobile = "?1"
+        sec_ch_ua_platform = '"Android"'
     else:
         viewport = {"width": 1920, "height": 1080}
         device_scale_factor = 1
         is_mobile = False
         user_agent = (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-            "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+            "(KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
         )
+        sec_ch_ua_mobile = "?0"
+        sec_ch_ua_platform = '"Windows"'
 
     os.makedirs("captures", exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -432,7 +436,11 @@ def capture_full_page(url: str, subsidiary_code: str, mode: str) -> str:
                 "--disable-setuid-sandbox",
                 "--disable-dev-shm-usage",
                 "--disable-blink-features=AutomationControlled",
+                "--disable-infobars",
+                "--disable-gpu",
+                "--disable-extensions",
                 "--ignore-certificate-errors",
+                "--start-maximized",
             ],
         )
 
@@ -442,15 +450,45 @@ def capture_full_page(url: str, subsidiary_code: str, mode: str) -> str:
             is_mobile=is_mobile,
             user_agent=user_agent,
             locale="en-US",
+            timezone_id="America/New_York",
             ignore_https_errors=True,
+            extra_http_headers={
+                "Upgrade-Insecure-Requests": "1",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+                "Accept-Language": "en-US,en;q=0.9",
+                "Sec-Ch-Ua": '"Not A(Brand";v="99", "Google Chrome";v="121", "Chromium";v="121"',
+                "Sec-Ch-Ua-Mobile": sec_ch_ua_mobile,
+                "Sec-Ch-Ua-Platform": sec_ch_ua_platform,
+                "Sec-Fetch-Dest": "document",
+                "Sec-Fetch-Mode": "navigate",
+                "Sec-Fetch-Site": "none",
+                "Sec-Fetch-User": "?1",
+            },
         )
-        # Execute the stealth patches as an IIFE so the body actually runs
         context.add_init_script(f"({_STEALTH_INIT_SCRIPT})()")
 
         page = context.new_page()
-        page.goto(url, wait_until="domcontentloaded", timeout=60_000)
 
-        # Let the page settle after the initial DOM load
+        # ── Block chat / tracking requests that trigger bot-detection ─────────
+        def _block_unwanted(route):
+            _u = route.request.url.lower()
+            _blocked = ["genesys", "liveperson", "salesforceliveagent", "adobe-privacy", "chatbot", "proactive-chat"]
+            if any(k in _u for k in _blocked):
+                route.abort()
+            else:
+                route.continue_()
+
+        page.route("**/*", _block_unwanted)
+
+        # ── Human-like mouse jitter before navigation ─────────────────────────
+        page.mouse.move(random.randint(0, 500), random.randint(0, 400))
+
+        page.goto(url, wait_until="domcontentloaded", timeout=90_000)
+
+        # Additional jitter post-load
+        page.mouse.move(random.randint(100, 800), random.randint(100, 600))
+
+        # Let the page settle
         try:
             page.wait_for_load_state("networkidle", timeout=20_000)
         except Exception:
@@ -479,24 +517,40 @@ def capture_full_page(url: str, subsidiary_code: str, mode: str) -> str:
             pos += step
             page.evaluate(f"window.scrollTo(0, {pos})")
             page.wait_for_timeout(150)
-            # Re-measure in case dynamic content extended the page
             total_height = page.evaluate("document.body.scrollHeight")
 
-        # Return to the very top before screenshotting
         page.evaluate("window.scrollTo(0, 0)")
         page.wait_for_timeout(500)
 
-        # ── Remove floating overlays that would obscure content ───────────────
+        # ── CSS cleanup: remove overlays, disable transitions ─────────────────
         page.evaluate("""
             () => {
+                const style = document.createElement('style');
+                style.innerHTML = `
+                    [class*="chat"], [id*="chat"], [class*="proactive"],
+                    .alk-container, #genesys-chat, .genesys-messenger,
+                    .floating-button-portal, #WAButton, .embeddedServiceHelpButton,
+                    .c-pop-toast__container, .onetrust-pc-dark-filter, #onetrust-consent-sdk,
+                    .c-membership-popup,
+                    [class*="cloud-shoplive"], [class*="csl-"], [class*="svelte-"],
+                    .l-cookie-teaser, .c-cookie-settings, .LiveMiniPreview,
+                    .c-notification-banner, .open-button,
+                    [id*="launcher"], [class*="helpdesk"]
+                    { display: none !important; visibility: hidden !important;
+                      opacity: 0 !important; pointer-events: none !important; }
+                    *, *::before, *::after {
+                        transition-duration: 0s !important;
+                        animation-duration: 0s !important;
+                        transition-delay: 0s !important;
+                        animation-delay: 0s !important;
+                    }
+                `;
+                document.head.appendChild(style);
                 ['onetrust-banner-sdk', 'onetrust-pc-dark-filter'].forEach(id => {
                     const el = document.getElementById(id);
                     if (el) el.remove();
                 });
-                document.querySelectorAll(
-                    '[id*="chat"], [class*="chat-widget"], [class*="livechat"], ' +
-                    '[class*="helpdesk"], [id*="launcher"]'
-                ).forEach(el => { el.style.display = 'none'; });
+                document.querySelectorAll('video').forEach(v => v.pause());
             }
         """)
         page.wait_for_timeout(300)
