@@ -612,11 +612,9 @@ def capture_full_page(url: str, subsidiary_code: str, mode: str) -> str:
 
                 # === TILED CAPTURE: scroll, load, screenshot per viewport tile, stitch ===
                 # Chromium has a ~16384 px texture limit at device-pixel level.
-                # At 2× DPR that's ~8192 CSS px.  Any full_page screenshot taller
-                # than that gets blank bands.  Fix: capture viewport-sized tiles
-                # and stitch them with Pillow.
-
-                from PIL import Image as PILImage
+                # At 2× DPR that's ~8192 CSS px.  For taller pages, DPR is
+                # reduced to 1× automatically.  We resize the viewport to the full
+                # page height and take a single screenshot — no tiling needed.
 
                 # 1. Wait for initial page load
                 try:
@@ -709,57 +707,46 @@ def capture_full_page(url: str, subsidiary_code: str, mode: str) -> str:
                         "This subsidiary may not have a prememberdays page."
                     )
 
-                # 6. Scroll back to top before tiling
+                # 6. Hide fixed/sticky elements so they don't float over content
+                page.evaluate("""() => {
+                    document.querySelectorAll('*').forEach(el => {
+                        const pos = window.getComputedStyle(el).position;
+                        if (pos === 'fixed' || pos === 'sticky') {
+                            el.style.setProperty('position', 'absolute', 'important');
+                        }
+                    });
+                }""")
+
+                # 7. Resize viewport to full page height and capture in one shot.
+                #    This avoids all tiling/scrolling artefacts (nav duplication,
+                #    missing sections).  Chromium texture limit is ~16384 device px.
                 page.evaluate("window.scrollTo(0, 0)")
+                time.sleep(0.3)
+
+                dpr = 2
+                max_device_px = 16384
+                max_css_h = max_device_px // dpr  # 8192 at 2× DPR
+
+                if total_h > max_css_h:
+                    # Page is very tall — drop to 1× DPR to stay under texture limit
+                    dpr = 1
+                    max_css_h = max_device_px  # 16384 at 1×
+
+                # Set viewport to full page height so everything is "in view"
+                page.set_viewport_size({"width": vp_w, "height": min(total_h, max_css_h)})
                 time.sleep(0.5)
 
-                # 7. Capture tiles — scroll to each position, screenshot the viewport
-                tiles: list = []
-                import io
-                y = 0
-                first_tile = True
-                while y < total_h:
-                    page.evaluate(f"window.scrollTo(0, {y})")
-                    time.sleep(0.4)
-                    _force_lazy()
-                    _wait_images()
+                # Re-trigger lazy loads now that everything is in the viewport
+                _force_lazy()
+                _wait_images()
+                time.sleep(0.5)
 
-                    tile_h = min(vp_h, total_h - y)
-                    # clip is relative to the viewport after scroll, so always y=0
-                    tile_bytes = page.screenshot(
-                        type="png",
-                        scale="device",
-                        clip={"x": 0, "y": 0, "width": vp_w, "height": tile_h},
-                    )
-                    tile_img = PILImage.open(io.BytesIO(tile_bytes))
-                    tiles.append((y, tile_img))
-
-                    # After the FIRST tile, hide fixed/sticky elements so the
-                    # navigation bar doesn't appear in every subsequent tile.
-                    if first_tile:
-                        first_tile = False
-                        page.evaluate("""() => {
-                            // Only hide elements whose computed position is fixed/sticky
-                            document.querySelectorAll('*').forEach(el => {
-                                const pos = window.getComputedStyle(el).position;
-                                if (pos === 'fixed' || pos === 'sticky') {
-                                    el.setAttribute('data-was-fixed', pos);
-                                    el.style.setProperty('display', 'none', 'important');
-                                }
-                            });
-                        }""")
-
-                    y += vp_h
-
-                # 7. Stitch tiles into one image
-                dpr = 2
-                final_w = vp_w * dpr
-                final_h = total_h * dpr
-                stitched = PILImage.new("RGB", (final_w, final_h))
-                for css_y, tile_img in tiles:
-                    stitched.paste(tile_img, (0, css_y * dpr))
-
-                stitched.save(output_path, format="PNG")
+                page.screenshot(
+                    path=output_path,
+                    full_page=True,
+                    type="png",
+                    scale="device",
+                )
                 return output_path
             except Exception as exc:
                 last_error = str(exc)
