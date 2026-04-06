@@ -294,6 +294,8 @@ def resolve_target_url(subsidiary_code: str) -> tuple[str, int]:
 def upload_to_cloudinary(file_path: str, subsidiary_code: str, mode: str) -> str | None:
     """Upload screenshot to Cloudinary and return the secure URL, or None on failure."""
     import hashlib
+    import io
+    from PIL import Image
 
     cloud_name = _secret("CLOUDINARY_CLOUD_NAME")
     api_key = _secret("CLOUDINARY_API_KEY")
@@ -301,6 +303,17 @@ def upload_to_cloudinary(file_path: str, subsidiary_code: str, mode: str) -> str
 
     if not all([cloud_name, api_key, api_secret]):
         return None
+
+    # Compress to JPEG in memory to stay under Cloudinary's 10 MB free plan limit
+    img = Image.open(file_path).convert("RGB")
+    buf = io.BytesIO()
+    quality = 85
+    img.save(buf, format="JPEG", quality=quality, optimize=True)
+    while buf.tell() > 9 * 1024 * 1024 and quality > 50:
+        quality -= 10
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=quality, optimize=True)
+    buf.seek(0)
 
     timestamp = int(time.time())
     folder = f"memberdays/{subsidiary_code}/{mode}"
@@ -315,10 +328,9 @@ def upload_to_cloudinary(file_path: str, subsidiary_code: str, mode: str) -> str
     sign_str = "&".join(f"{k}={v}" for k, v in sign_params) + api_secret
     signature = hashlib.sha1(sign_str.encode()).hexdigest()
 
-    with open(file_path, "rb") as f:
-        resp = requests.post(
+    resp = requests.post(
             f"https://api.cloudinary.com/v1_1/{cloud_name}/image/upload",
-            files={"file": f},
+            files={"file": (os.path.basename(file_path).replace('.png', '.jpg'), buf, "image/jpeg")},
             data={
                 "api_key": api_key,
                 "timestamp": timestamp,
