@@ -610,95 +610,114 @@ def capture_full_page(url: str, subsidiary_code: str, mode: str) -> str:
                 except Exception:
                     pass
 
-                # === FULL-PAGE LAZY-LOAD PIPELINE ===
-                # 1. Initial networkidle wait
+                # === VIEWPORT-EXPANSION LAZY-LOAD STRATEGY ===
+                # Instead of simulating scroll, resize viewport to full page height
+                # so everything is "in viewport" and all IntersectionObservers fire at once.
+
+                # 1. Wait for initial load
                 try:
                     page.wait_for_load_state("networkidle", timeout=15000)
                 except Exception:
                     pass
 
-                # 2. Measure initial page height
-                initial_height = page.evaluate(
-                    "() => Math.max(document.body.scrollHeight, document.documentElement.scrollHeight)"
+                # 2. Get document height and expand viewport to cover entire page
+                doc_height = page.evaluate(
+                    "() => Math.max(document.body.scrollHeight,"
+                    " document.documentElement.scrollHeight,"
+                    " document.body.offsetHeight,"
+                    " document.documentElement.offsetHeight)"
                 )
-                viewport_h = page.evaluate("() => window.innerHeight || 1080")
+                page.set_viewport_size({"width": viewport["width"], "height": doc_height})
+                time.sleep(2)
 
-                # 3. Slow scroll through the entire page to trigger intersection observers.
-                #    Use half-viewport steps with 0.6s pause — gives each section time to
-                #    fire its lazy-load and start image downloads before we move past it.
-                step = max(int(viewport_h * 0.5), 300)
-                pos = 0
-                max_pos = int(initial_height * 1.05)  # allow 5% growth, no more
-                while pos < max_pos:
-                    page.evaluate(f"window.scrollTo(0, {pos})")
-                    time.sleep(0.6)
-                    pos += step
-
-                # 4. Sit at the bottom briefly for any final section triggers
-                page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                time.sleep(1)
-
-                # 5. Force every lazy image to eager and swap data-src attributes
+                # 3. Force lazy images: swap data-src → src, set loading=eager
                 page.evaluate("""
                     () => {
-                        document.querySelectorAll('img, source, video').forEach(el => {
+                        document.querySelectorAll('img, source, video, iframe').forEach(el => {
                             if ('loading' in el) el.loading = 'eager';
-                            ['data-src', 'data-lazy-src', 'data-original'].forEach(attr => {
-                                const val = el.getAttribute(attr);
-                                if (val && !el.getAttribute('src')) el.setAttribute('src', val);
+                            ['data-src', 'data-lazy-src', 'data-original', 'data-lazy'].forEach(a => {
+                                const v = el.getAttribute(a);
+                                if (v) el.setAttribute('src', v);
                             });
-                            ['data-srcset', 'data-lazy-srcset'].forEach(attr => {
-                                const val = el.getAttribute(attr);
-                                if (val && !el.getAttribute('srcset')) el.setAttribute('srcset', val);
+                            ['data-srcset', 'data-lazy-srcset'].forEach(a => {
+                                const v = el.getAttribute(a);
+                                if (v) el.setAttribute('srcset', v);
                             });
+                            // Also handle CSS background-image from data attributes
+                            if (el.dataset && el.dataset.bgSrc) {
+                                el.style.backgroundImage = 'url(' + el.dataset.bgSrc + ')';
+                            }
                         });
                     }
                 """)
 
-                # 6. Wait for all in-flight image downloads to finish
+                # 4. Wait for network to settle after triggering all lazy loads
                 try:
-                    page.wait_for_load_state("networkidle", timeout=20000)
+                    page.wait_for_load_state("networkidle", timeout=25000)
                 except Exception:
                     pass
 
-                # 7. Explicitly wait for every <img> to be .complete
+                # 5. Wait for every <img> to report .complete
                 page.evaluate("""
                     async () => {
-                        const imgs = Array.from(document.images);
-                        await Promise.all(imgs.map(img => {
+                        await Promise.all(Array.from(document.images).map(img => {
                             if (img.complete) return Promise.resolve();
-                            return new Promise(resolve => {
-                                img.addEventListener('load', resolve, {once: true});
-                                img.addEventListener('error', resolve, {once: true});
-                                setTimeout(resolve, 8000);
+                            return new Promise(r => {
+                                img.addEventListener('load', r, {once:true});
+                                img.addEventListener('error', r, {once:true});
+                                setTimeout(r, 10000);
                             });
                         }));
                     }
                 """)
 
-                # 8. Scroll back to top, let layout settle
-                page.evaluate("window.scrollTo(0, 0)")
-                time.sleep(3)
-
-                # 9. Second pass scroll (fast) — catches anything the first pass missed
-                final_height = page.evaluate(
-                    "() => Math.max(document.body.scrollHeight, document.documentElement.scrollHeight)"
+                # 6. Re-measure height (may have grown), expand viewport again
+                doc_height2 = page.evaluate(
+                    "() => Math.max(document.body.scrollHeight,"
+                    " document.documentElement.scrollHeight,"
+                    " document.body.offsetHeight,"
+                    " document.documentElement.offsetHeight)"
                 )
-                fast_step = max(int(viewport_h * 0.9), 500)
-                pos = 0
-                while pos < final_height:
-                    page.evaluate(f"window.scrollTo(0, {pos})")
-                    time.sleep(0.15)
-                    pos += fast_step
+                if doc_height2 > doc_height:
+                    page.set_viewport_size({"width": viewport["width"], "height": doc_height2})
+                    time.sleep(1)
+                    # Force lazy images again for newly appeared sections
+                    page.evaluate("""
+                        () => {
+                            document.querySelectorAll('img, source').forEach(el => {
+                                if ('loading' in el) el.loading = 'eager';
+                                ['data-src', 'data-lazy-src', 'data-original', 'data-lazy'].forEach(a => {
+                                    const v = el.getAttribute(a);
+                                    if (v) el.setAttribute('src', v);
+                                });
+                            });
+                        }
+                    """)
+                    try:
+                        page.wait_for_load_state("networkidle", timeout=15000)
+                    except Exception:
+                        pass
+                    page.evaluate("""
+                        async () => {
+                            await Promise.all(Array.from(document.images).map(img => {
+                                if (img.complete) return Promise.resolve();
+                                return new Promise(r => {
+                                    img.addEventListener('load', r, {once:true});
+                                    img.addEventListener('error', r, {once:true});
+                                    setTimeout(r, 10000);
+                                });
+                            }));
+                        }
+                    """)
 
-                # 10. Final networkidle + image wait
+                # 7. Restore original viewport and wait for fonts
+                page.set_viewport_size(viewport)
+                page.evaluate("window.scrollTo(0, 0)")
                 try:
-                    page.wait_for_load_state("networkidle", timeout=15000)
+                    page.evaluate("() => document.fonts.ready")
                 except Exception:
                     pass
-
-                page.evaluate("window.scrollTo(0, 0)")
-                time.sleep(2)
+                time.sleep(3)
 
                 # Clean up overlays and force-reveal any still-hidden content
                 page_cleanup(page)
