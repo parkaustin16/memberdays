@@ -400,32 +400,57 @@ def save_to_airtable(
 
 
 def page_cleanup(page) -> None:
-    """Remove overlays and disable motion before capture."""
+    """Hide overlays and force all content visible right before capture.
+
+    IMPORTANT: Call this AFTER scrolling/lazy-load pipeline, not before.
+    Earlier versions killed CSS animations pre-scroll, which left fade-in
+    sections stuck at opacity:0.
+    """
     page.evaluate(
         """
         () => {
-            const style = document.createElement('style');
-            style.innerHTML = `
-                [class*="chat"], [id*="chat"], [class*="cookie"], [id*="cookie"],
+            // 1. Hide overlays — use specific selectors, not broad class*="chat"
+            const overlayStyle = document.createElement('style');
+            overlayStyle.setAttribute('data-capture-cleanup', 'true');
+            overlayStyle.innerHTML = `
                 .c-pop-toast__container, .c-notification-banner,
                 #onetrust-consent-sdk, .onetrust-pc-dark-filter,
                 .embeddedServiceHelpButton, .floating-button-portal,
-                .l-cookie-teaser, .c-membership-popup {
+                .l-cookie-teaser, .c-membership-popup,
+                [id*="chat-widget"], [id*="chatbot"],
+                .chat-button, .chat-container,
+                [class*="cookie-banner"], [class*="cookie-consent"] {
                     display: none !important;
                     visibility: hidden !important;
-                    opacity: 0 !important;
-                    pointer-events: none !important;
-                }
-                *, *::before, *::after {
-                    animation-duration: 0s !important;
-                    transition-duration: 0s !important;
-                    animation-delay: 0s !important;
-                    transition-delay: 0s !important;
                 }
             `;
-            document.head.appendChild(style);
+            document.head.appendChild(overlayStyle);
+
+            // 2. Force ALL elements to be visible — counteracts scroll-triggered
+            //    fade-in animations that may not have completed
+            document.querySelectorAll('*').forEach(el => {
+                const cs = window.getComputedStyle(el);
+                if (cs.opacity === '0' || cs.opacity === '0.0') {
+                    el.style.opacity = '1';
+                }
+                if (cs.visibility === 'hidden') {
+                    el.style.visibility = 'visible';
+                }
+            });
+
+            // 3. NOW freeze animations so nothing moves during the screenshot
+            const freezeStyle = document.createElement('style');
+            freezeStyle.setAttribute('data-capture-freeze', 'true');
+            freezeStyle.innerHTML = `
+                *, *::before, *::after {
+                    animation: none !important;
+                    transition: none !important;
+                }
+            `;
+            document.head.appendChild(freezeStyle);
+
+            // 4. Pause videos
             document.querySelectorAll('video').forEach(v => v.pause());
-            window.scrollTo(0, 0);
         }
         """
     )
@@ -585,8 +610,6 @@ def capture_full_page(url: str, subsidiary_code: str, mode: str) -> str:
                 except Exception:
                     pass
 
-                page_cleanup(page)
-
                 # === FULL-PAGE LAZY-LOAD PIPELINE ===
                 # 1. Initial networkidle wait
                 try:
@@ -676,6 +699,10 @@ def capture_full_page(url: str, subsidiary_code: str, mode: str) -> str:
 
                 page.evaluate("window.scrollTo(0, 0)")
                 time.sleep(2)
+
+                # Clean up overlays and force-reveal any still-hidden content
+                page_cleanup(page)
+                time.sleep(1)
 
                 if is_access_denied_page(page):
                     debug_base = os.path.join(debug_dir, f"{subsidiary_code}_{mode}_{profile['name']}_{timestamp}")
