@@ -304,10 +304,14 @@ def upload_to_cloudinary(file_path: str, subsidiary_code: str, mode: str) -> str
     if not all([cloud_name, api_key, api_secret]):
         return None
 
-    # JPEG q95 at full resolution: fast to encode, ~4-5 MB, visually near-lossless
+    # Resize PNG to 2560px wide (from 3840px 2×DPR) — lossless, ~4MB, still 2.5K crisp
     img = Image.open(file_path).convert("RGB")
+    target_w = 2560
+    if img.width > target_w:
+        ratio = target_w / img.width
+        img = img.resize((target_w, int(img.height * ratio)), Image.LANCZOS)
     buf = io.BytesIO()
-    img.save(buf, format="JPEG", quality=95, optimize=True, subsampling=0)
+    img.save(buf, format="PNG")
     buf.seek(0)
 
     timestamp = int(time.time())
@@ -325,7 +329,7 @@ def upload_to_cloudinary(file_path: str, subsidiary_code: str, mode: str) -> str
 
     resp = requests.post(
             f"https://api.cloudinary.com/v1_1/{cloud_name}/image/upload",
-            files={"file": (os.path.basename(file_path).replace('.png', '.jpg'), buf, "image/jpeg")},
+            files={"file": (os.path.basename(file_path), buf, "image/png")},
             data={
                 "api_key": api_key,
                 "timestamp": timestamp,
