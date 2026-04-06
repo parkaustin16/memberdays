@@ -304,16 +304,23 @@ def upload_to_cloudinary(file_path: str, subsidiary_code: str, mode: str) -> str
     if not all([cloud_name, api_key, api_secret]):
         return None
 
-    # Resize to 1920px wide (from 3840px 2× DPR) then encode as high-quality JPEG
-    # This keeps the image sharp while staying well under Cloudinary's 10 MB limit
-    img = Image.open(file_path).convert("RGB")
-    target_w = 1920
-    if img.width > target_w:
-        ratio = target_w / img.width
-        img = img.resize((target_w, int(img.height * ratio)), Image.LANCZOS)
+    # Keep PNG quality — shrink dimensions only as much as needed to stay under 9.5 MB
+    LIMIT = 9.5 * 1024 * 1024
+    img = Image.open(file_path).convert("RGBA").convert("RGB")
+    orig_w, orig_h = img.width, img.height
 
     buf = io.BytesIO()
-    img.save(buf, format="JPEG", quality=92, optimize=True)
+    img.save(buf, format="PNG", optimize=True)
+
+    scale = 1.0
+    while buf.tell() > LIMIT and scale > 0.5:
+        # Estimate scale factor needed from current overage, then step down 3% at a time
+        scale = min(scale - 0.03, (LIMIT / buf.tell()) ** 0.5 * scale)
+        new_w = max(int(orig_w * scale), 1)
+        new_h = max(int(orig_h * scale), 1)
+        buf = io.BytesIO()
+        img.resize((new_w, new_h), Image.LANCZOS).save(buf, format="PNG", optimize=True)
+
     buf.seek(0)
 
     timestamp = int(time.time())
@@ -331,7 +338,7 @@ def upload_to_cloudinary(file_path: str, subsidiary_code: str, mode: str) -> str
 
     resp = requests.post(
             f"https://api.cloudinary.com/v1_1/{cloud_name}/image/upload",
-            files={"file": (os.path.basename(file_path).replace('.png', '.jpg'), buf, "image/jpeg")},
+            files={"file": (os.path.basename(file_path), buf, "image/png")},
             data={
                 "api_key": api_key,
                 "timestamp": timestamp,
