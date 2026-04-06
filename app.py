@@ -709,25 +709,25 @@ def capture_full_page(url: str, subsidiary_code: str, mode: str) -> str:
                         "This subsidiary may not have a prememberdays page."
                     )
 
-                # 6. Capture tiles — one viewport-height screenshot at a time
+                # 6. Capture tiles — scroll to each position, screenshot the viewport
                 tiles: list = []
+                import io
                 y = 0
                 while y < total_h:
                     page.evaluate(f"window.scrollTo(0, {y})")
-                    time.sleep(0.3)
-                    # At each tile position, wait for visible images to finish
+                    time.sleep(0.4)
                     _force_lazy()
                     _wait_images()
 
                     tile_h = min(vp_h, total_h - y)
+                    # clip is relative to the viewport after scroll, so always y=0
                     tile_bytes = page.screenshot(
                         type="png",
                         scale="device",
-                        clip={"x": 0, "y": y, "width": vp_w, "height": tile_h},
+                        clip={"x": 0, "y": 0, "width": vp_w, "height": tile_h},
                     )
-                    import io
                     tile_img = PILImage.open(io.BytesIO(tile_bytes))
-                    tiles.append((y, tile_h, tile_img))
+                    tiles.append((y, tile_img))
                     y += vp_h
 
                 # 7. Stitch tiles into one image
@@ -735,7 +735,7 @@ def capture_full_page(url: str, subsidiary_code: str, mode: str) -> str:
                 final_w = vp_w * dpr
                 final_h = total_h * dpr
                 stitched = PILImage.new("RGB", (final_w, final_h))
-                for css_y, css_h, tile_img in tiles:
+                for css_y, tile_img in tiles:
                     stitched.paste(tile_img, (0, css_y * dpr))
 
                 stitched.save(output_path, format="PNG")
