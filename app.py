@@ -739,7 +739,7 @@ def capture_full_page(url: str, subsidiary_code: str, mode: str) -> str:
                 # Re-trigger lazy loads now that everything is in the viewport
                 _force_lazy()
                 _wait_images()
-                time.sleep(0.5)
+                time.sleep(10)
 
                 page.screenshot(
                     path=output_path,
