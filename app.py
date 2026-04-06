@@ -709,10 +709,15 @@ def capture_full_page(url: str, subsidiary_code: str, mode: str) -> str:
                         "This subsidiary may not have a prememberdays page."
                     )
 
-                # 6. Capture tiles — scroll to each position, screenshot the viewport
+                # 6. Scroll back to top before tiling
+                page.evaluate("window.scrollTo(0, 0)")
+                time.sleep(0.5)
+
+                # 7. Capture tiles — scroll to each position, screenshot the viewport
                 tiles: list = []
                 import io
                 y = 0
+                first_tile = True
                 while y < total_h:
                     page.evaluate(f"window.scrollTo(0, {y})")
                     time.sleep(0.4)
@@ -728,6 +733,22 @@ def capture_full_page(url: str, subsidiary_code: str, mode: str) -> str:
                     )
                     tile_img = PILImage.open(io.BytesIO(tile_bytes))
                     tiles.append((y, tile_img))
+
+                    # After the FIRST tile, hide fixed/sticky elements so the
+                    # navigation bar doesn't appear in every subsequent tile.
+                    if first_tile:
+                        first_tile = False
+                        page.evaluate("""() => {
+                            // Only hide elements whose computed position is fixed/sticky
+                            document.querySelectorAll('*').forEach(el => {
+                                const pos = window.getComputedStyle(el).position;
+                                if (pos === 'fixed' || pos === 'sticky') {
+                                    el.setAttribute('data-was-fixed', pos);
+                                    el.style.setProperty('display', 'none', 'important');
+                                }
+                            });
+                        }""")
+
                     y += vp_h
 
                 # 7. Stitch tiles into one image
