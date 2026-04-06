@@ -728,15 +728,22 @@ def capture_full_page(url: str, subsidiary_code: str, mode: str) -> str:
                     page.evaluate(f"window.scrollTo(0, {y})")
                     time.sleep(0.35)
 
-                    # Hide fixed/sticky elements for all tiles after the first one.
-                    # This prevents the nav bar from appearing in every tile.
-                    # Runs synchronously — guaranteed to complete before screenshot.
+                    # Hide ONLY nav-bar-like fixed/sticky elements for tiles 2+.
+                    # Nav bars are small (< 300 CSS-px tall) and sit at the top of
+                    # the viewport.  Content sections (hero banners, floating text
+                    # overlays) are taller and must NOT be hidden.
+                    # Use visibility:hidden (not display:none) so document flow and
+                    # sizing are unaffected — fixed elements don't participate in
+                    # flow anyway.
                     if y > 0:
                         page.evaluate("""() => {
                             document.querySelectorAll('*').forEach(el => {
                                 const pos = window.getComputedStyle(el).position;
                                 if (pos === 'fixed' || pos === 'sticky') {
-                                    el.style.setProperty('display', 'none', 'important');
+                                    const rect = el.getBoundingClientRect();
+                                    if (rect.height < 300) {
+                                        el.style.setProperty('visibility', 'hidden', 'important');
+                                    }
                                 }
                             });
                         }""")
