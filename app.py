@@ -594,27 +594,42 @@ def capture_full_page(url: str, subsidiary_code: str, mode: str) -> str:
 
                 page_cleanup(page)
 
-                # Wait for all network activity to settle so images are fully loaded
-                try:
-                    page.wait_for_load_state("networkidle", timeout=15000)
-                except Exception:
-                    pass  # Proceed even if some requests never settle
-
-                # Force all images to render at crisp full resolution
+                # Scroll through the full page to trigger lazy-loaded sections
                 page.evaluate("""
-                    () => {
-                        document.querySelectorAll('img').forEach(img => {
-                            img.style.imageRendering = 'auto';
-                            img.decoding = 'sync';
-                            if (img.loading === 'lazy') {
-                                img.loading = 'eager';
-                                const src = img.src;
-                                img.src = '';
-                                img.src = src;
-                            }
+                    async () => {
+                        await new Promise(resolve => {
+                            const step = Math.max(300, window.innerHeight * 0.8);
+                            let pos = 0;
+                            const interval = setInterval(() => {
+                                window.scrollTo(0, pos);
+                                pos += step;
+                                if (pos >= document.body.scrollHeight) {
+                                    clearInterval(interval);
+                                    resolve();
+                                }
+                            }, 120);
                         });
                     }
                 """)
+
+                # Wait for lazy-loaded images to finish loading after scroll
+                try:
+                    page.wait_for_load_state("networkidle", timeout=20000)
+                except Exception:
+                    pass
+
+                # Force any remaining lazy images to load
+                page.evaluate("""
+                    () => {
+                        document.querySelectorAll('img[loading="lazy"]').forEach(img => {
+                            img.loading = 'eager';
+                            if (img.dataset.src) img.src = img.dataset.src;
+                        });
+                    }
+                """)
+
+                # Scroll back to top and wait for the page to settle before capture
+                page.evaluate("window.scrollTo(0, 0)")
                 time.sleep(3)
 
                 if is_access_denied_page(page):
