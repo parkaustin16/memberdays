@@ -717,29 +717,18 @@ def capture_full_page(url: str, subsidiary_code: str, mode: str) -> str:
                     });
                 }""")
 
-                # 7. Resize viewport to full page height and capture in one shot.
-                #    This avoids all tiling/scrolling artefacts (nav duplication,
-                #    missing sections).  Chromium texture limit is ~16384 device px.
+                # 7. Scroll to top and capture with full_page=True.
+                #    DO NOT resize the viewport — that breaks vh-based layouts
+                #    (hero banners, 100vh sections stretch to absurd heights).
+                #    Playwright's full_page=True captures internally without
+                #    changing the CSS viewport the page sees.
                 page.evaluate("window.scrollTo(0, 0)")
-                time.sleep(0.3)
+                time.sleep(1)
 
-                dpr = 2
-                max_device_px = 16384
-                max_css_h = max_device_px // dpr  # 8192 at 2× DPR
-
-                if total_h > max_css_h:
-                    # Page is very tall — drop to 1× DPR to stay under texture limit
-                    dpr = 1
-                    max_css_h = max_device_px  # 16384 at 1×
-
-                # Set viewport to full page height so everything is "in view"
-                page.set_viewport_size({"width": vp_w, "height": min(total_h, max_css_h)})
-                time.sleep(0.5)
-
-                # Re-trigger lazy loads now that everything is in the viewport
+                # One more lazy-load + image wait pass
                 _force_lazy()
                 _wait_images()
-                time.sleep(5)
+                time.sleep(1)
 
                 page.screenshot(
                     path=output_path,
