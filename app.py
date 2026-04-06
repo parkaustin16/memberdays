@@ -610,116 +610,86 @@ def capture_full_page(url: str, subsidiary_code: str, mode: str) -> str:
                 except Exception:
                     pass
 
-                # === VIEWPORT-EXPANSION LAZY-LOAD STRATEGY ===
-                # Instead of simulating scroll, resize viewport to full page height
-                # so everything is "in viewport" and all IntersectionObservers fire at once.
+                # === TILED CAPTURE: scroll, load, screenshot per viewport tile, stitch ===
+                # Chromium has a ~16384 px texture limit at device-pixel level.
+                # At 2× DPR that's ~8192 CSS px.  Any full_page screenshot taller
+                # than that gets blank bands.  Fix: capture viewport-sized tiles
+                # and stitch them with Pillow.
 
-                # 1. Wait for initial load
+                from PIL import Image as PILImage
+
+                # 1. Wait for initial page load
+                try:
+                    page.wait_for_load_state("load", timeout=30000)
+                except Exception:
+                    pass
                 try:
                     page.wait_for_load_state("networkidle", timeout=15000)
                 except Exception:
                     pass
 
-                # 2. Get document height and expand viewport to cover entire page
-                doc_height = page.evaluate(
-                    "() => Math.max(document.body.scrollHeight,"
-                    " document.documentElement.scrollHeight,"
-                    " document.body.offsetHeight,"
-                    " document.documentElement.offsetHeight)"
-                )
-                page.set_viewport_size({"width": viewport["width"], "height": doc_height})
-                time.sleep(2)
+                vp_w = viewport["width"]
+                vp_h = viewport["height"]
 
-                # 3. Force lazy images: swap data-src → src, set loading=eager
-                page.evaluate("""
-                    () => {
-                        document.querySelectorAll('img, source, video, iframe').forEach(el => {
+                def _force_lazy():
+                    page.evaluate("""() => {
+                        document.querySelectorAll('img, source, video, picture').forEach(el => {
                             if ('loading' in el) el.loading = 'eager';
-                            ['data-src', 'data-lazy-src', 'data-original', 'data-lazy'].forEach(a => {
+                            ['data-src','data-lazy-src','data-original','data-lazy'].forEach(a => {
                                 const v = el.getAttribute(a);
                                 if (v) el.setAttribute('src', v);
                             });
-                            ['data-srcset', 'data-lazy-srcset'].forEach(a => {
+                            ['data-srcset','data-lazy-srcset'].forEach(a => {
                                 const v = el.getAttribute(a);
                                 if (v) el.setAttribute('srcset', v);
                             });
-                            // Also handle CSS background-image from data attributes
-                            if (el.dataset && el.dataset.bgSrc) {
-                                el.style.backgroundImage = 'url(' + el.dataset.bgSrc + ')';
-                            }
                         });
-                    }
-                """)
+                    }""")
 
-                # 4. Wait for network to settle after triggering all lazy loads
-                try:
-                    page.wait_for_load_state("networkidle", timeout=25000)
-                except Exception:
-                    pass
-
-                # 5. Wait for every <img> to report .complete
-                page.evaluate("""
-                    async () => {
+                def _wait_images():
+                    page.evaluate("""async () => {
                         await Promise.all(Array.from(document.images).map(img => {
-                            if (img.complete) return Promise.resolve();
+                            if (img.complete) return;
                             return new Promise(r => {
-                                img.addEventListener('load', r, {once:true});
-                                img.addEventListener('error', r, {once:true});
-                                setTimeout(r, 10000);
+                                img.onload = img.onerror = r;
+                                setTimeout(r, 8000);
                             });
                         }));
-                    }
-                """)
+                    }""")
 
-                # 6. Re-measure height (may have grown), expand viewport again
-                doc_height2 = page.evaluate(
-                    "() => Math.max(document.body.scrollHeight,"
-                    " document.documentElement.scrollHeight,"
-                    " document.body.offsetHeight,"
-                    " document.documentElement.offsetHeight)"
+                # 2. First slow scroll to trigger IntersectionObservers + lazy loads
+                doc_h = page.evaluate(
+                    "() => Math.max(document.body.scrollHeight, document.documentElement.scrollHeight)"
                 )
-                if doc_height2 > doc_height:
-                    page.set_viewport_size({"width": viewport["width"], "height": doc_height2})
-                    time.sleep(1)
-                    # Force lazy images again for newly appeared sections
-                    page.evaluate("""
-                        () => {
-                            document.querySelectorAll('img, source').forEach(el => {
-                                if ('loading' in el) el.loading = 'eager';
-                                ['data-src', 'data-lazy-src', 'data-original', 'data-lazy'].forEach(a => {
-                                    const v = el.getAttribute(a);
-                                    if (v) el.setAttribute('src', v);
-                                });
-                            });
-                        }
-                    """)
-                    try:
-                        page.wait_for_load_state("networkidle", timeout=15000)
-                    except Exception:
-                        pass
-                    page.evaluate("""
-                        async () => {
-                            await Promise.all(Array.from(document.images).map(img => {
-                                if (img.complete) return Promise.resolve();
-                                return new Promise(r => {
-                                    img.addEventListener('load', r, {once:true});
-                                    img.addEventListener('error', r, {once:true});
-                                    setTimeout(r, 10000);
-                                });
-                            }));
-                        }
-                    """)
+                step = int(vp_h * 0.7)
+                pos = 0
+                while pos < doc_h:
+                    page.evaluate(f"window.scrollTo(0, {pos})")
+                    _force_lazy()
+                    time.sleep(0.5)
+                    pos += step
+                    # re-measure in case page grew
+                    doc_h = min(
+                        page.evaluate("() => Math.max(document.body.scrollHeight, document.documentElement.scrollHeight)"),
+                        doc_h + vp_h * 3  # cap growth
+                    )
 
-                # 7. Restore original viewport and wait for fonts
-                page.set_viewport_size(viewport)
-                page.evaluate("window.scrollTo(0, 0)")
+                # 3. Sit at bottom, force lazy, wait for images
+                page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                _force_lazy()
                 try:
-                    page.evaluate("() => document.fonts.ready")
+                    page.wait_for_load_state("networkidle", timeout=20000)
                 except Exception:
                     pass
-                time.sleep(3)
+                _wait_images()
+                time.sleep(1)
 
-                # Clean up overlays and force-reveal any still-hidden content
+                # 4. Final page height
+                total_h = page.evaluate(
+                    "() => Math.max(document.body.scrollHeight, document.documentElement.scrollHeight)"
+                )
+
+                # 5. Clean up overlays and force-reveal hidden content
                 page_cleanup(page)
                 time.sleep(1)
 
@@ -739,13 +709,36 @@ def capture_full_page(url: str, subsidiary_code: str, mode: str) -> str:
                         "This subsidiary may not have a prememberdays page."
                     )
 
-                # PNG is lossless; omit quality param (only applies to jpeg)
-                page.screenshot(
-                    path=output_path,
-                    full_page=True,
-                    type="png",
-                    scale="device",  # honours the 3× device_scale_factor
-                )
+                # 6. Capture tiles — one viewport-height screenshot at a time
+                tiles: list = []
+                y = 0
+                while y < total_h:
+                    page.evaluate(f"window.scrollTo(0, {y})")
+                    time.sleep(0.3)
+                    # At each tile position, wait for visible images to finish
+                    _force_lazy()
+                    _wait_images()
+
+                    tile_h = min(vp_h, total_h - y)
+                    tile_bytes = page.screenshot(
+                        type="png",
+                        scale="device",
+                        clip={"x": 0, "y": y, "width": vp_w, "height": tile_h},
+                    )
+                    import io
+                    tile_img = PILImage.open(io.BytesIO(tile_bytes))
+                    tiles.append((y, tile_h, tile_img))
+                    y += vp_h
+
+                # 7. Stitch tiles into one image
+                dpr = 2
+                final_w = vp_w * dpr
+                final_h = total_h * dpr
+                stitched = PILImage.new("RGB", (final_w, final_h))
+                for css_y, css_h, tile_img in tiles:
+                    stitched.paste(tile_img, (0, css_y * dpr))
+
+                stitched.save(output_path, format="PNG")
                 return output_path
             except Exception as exc:
                 last_error = str(exc)
