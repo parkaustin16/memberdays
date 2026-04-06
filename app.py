@@ -304,15 +304,16 @@ def upload_to_cloudinary(file_path: str, subsidiary_code: str, mode: str) -> str
     if not all([cloud_name, api_key, api_secret]):
         return None
 
-    # Compress to JPEG in memory to stay under Cloudinary's 10 MB free plan limit
+    # Resize to 1920px wide (from 3840px 2× DPR) then encode as high-quality JPEG
+    # This keeps the image sharp while staying well under Cloudinary's 10 MB limit
     img = Image.open(file_path).convert("RGB")
+    target_w = 1920
+    if img.width > target_w:
+        ratio = target_w / img.width
+        img = img.resize((target_w, int(img.height * ratio)), Image.LANCZOS)
+
     buf = io.BytesIO()
-    quality = 85
-    img.save(buf, format="JPEG", quality=quality, optimize=True)
-    while buf.tell() > 9 * 1024 * 1024 and quality > 50:
-        quality -= 10
-        buf = io.BytesIO()
-        img.save(buf, format="JPEG", quality=quality, optimize=True)
+    img.save(buf, format="JPEG", quality=92, optimize=True)
     buf.seek(0)
 
     timestamp = int(time.time())
