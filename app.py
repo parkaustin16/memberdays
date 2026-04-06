@@ -299,8 +299,14 @@ def upload_to_cloudinary(file_path: str, subsidiary_code: str, mode: str) -> str
     folder = f"memberdays/{subsidiary_code}/{mode}"
     public_id = f"{subsidiary_code}_{mode}_prememberdays_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
-    params_to_sign = f"folder={folder}&public_id={public_id}&timestamp={timestamp}{api_secret}"
-    signature = hashlib.sha1(params_to_sign.encode()).hexdigest()
+    # Parameters must be sorted alphabetically before signing (exclude api_key, file, resource_type)
+    sign_params = sorted([
+        ("folder", folder),
+        ("public_id", public_id),
+        ("timestamp", str(timestamp)),
+    ])
+    sign_str = "&".join(f"{k}={v}" for k, v in sign_params) + api_secret
+    signature = hashlib.sha1(sign_str.encode()).hexdigest()
 
     with open(file_path, "rb") as f:
         resp = requests.post(
@@ -315,7 +321,14 @@ def upload_to_cloudinary(file_path: str, subsidiary_code: str, mode: str) -> str
             },
             verify=False,
         )
-    resp.raise_for_status()
+
+    if not resp.ok:
+        try:
+            err_body = resp.json()
+        except Exception:
+            err_body = resp.text
+        raise RuntimeError(f"Cloudinary HTTP {resp.status_code}: {err_body}")
+
     return resp.json().get("secure_url")
 
 
@@ -763,8 +776,9 @@ def main() -> None:
                 if all([_secret("CLOUDINARY_CLOUD_NAME"), _secret("CLOUDINARY_API_KEY"), _secret("CLOUDINARY_API_SECRET")]):
                     try:
                         _capture_url = upload_to_cloudinary(output_path, _sub, _m)
+                        st.caption(f"📤 Cloudinary: {_capture_url}")
                     except Exception as _e:
-                        st.warning(f"Cloudinary upload skipped: {_e}")
+                        st.warning(f"Cloudinary upload failed: {_e}")
                 try:
                     _record_id = save_to_airtable(_sub, _label, _m, _capture_url)
                     st.session_state["airtable_status"] = ("success", f"✅ Saved to Airtable (record: {_record_id})")
