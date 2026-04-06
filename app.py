@@ -399,392 +399,115 @@ def save_to_airtable(
     return resp.json().get("id")
 
 
-def page_cleanup(page) -> None:
-    """Hide overlays and force all content visible right before capture.
-
-    IMPORTANT: Call this AFTER scrolling/lazy-load pipeline, not before.
-    Earlier versions killed CSS animations pre-scroll, which left fade-in
-    sections stuck at opacity:0.
-    """
-    page.evaluate(
-        """
-        () => {
-            // 1. Hide overlays — use specific selectors, not broad class*="chat"
-            const overlayStyle = document.createElement('style');
-            overlayStyle.setAttribute('data-capture-cleanup', 'true');
-            overlayStyle.innerHTML = `
-                .c-pop-toast__container, .c-notification-banner,
-                #onetrust-consent-sdk, .onetrust-pc-dark-filter,
-                .embeddedServiceHelpButton, .floating-button-portal,
-                .l-cookie-teaser, .c-membership-popup,
-                [id*="chat-widget"], [id*="chatbot"],
-                .chat-button, .chat-container,
-                [class*="cookie-banner"], [class*="cookie-consent"] {
-                    display: none !important;
-                    visibility: hidden !important;
-                }
-            `;
-            document.head.appendChild(overlayStyle);
-
-            // 2. Freeze animations at their CURRENT frame so nothing moves
-            //    during the screenshot.  Using animation-play-state:paused
-            //    instead of animation:none — the latter removes animations
-            //    entirely, snapping elements (like hero-banner floating text)
-            //    back to their initial CSS position and jumbling the layout.
-            const freezeStyle = document.createElement('style');
-            freezeStyle.setAttribute('data-capture-freeze', 'true');
-            freezeStyle.innerHTML = `
-                *, *::before, *::after {
-                    animation-play-state: paused !important;
-                    transition: none !important;
-                }
-            `;
-            document.head.appendChild(freezeStyle);
-
-            // 4. Pause videos
-            document.querySelectorAll('video').forEach(v => v.pause());
-        }
-        """
-    )
-
-
-def is_access_denied_page(page) -> bool:
-    """Detect genuine WAF/CDN block pages only.
-
-    Uses inner_text (visible text only) to avoid false-positives from
-    script/JSON content that legitimately contains words like 'bot' or 'blocked'.
-    Only matches phrases that only ever appear on actual block screens.
-    """
-    try:
-        # inner_text returns only visible rendered text, filters out scripts/styles
-        page_text = page.inner_text("body").lower()
-    except Exception:
-        page_text = ""
-
-    try:
-        title = page.title().lower()
-    except Exception:
-        title = ""
-
-    # Keep markers specific: must only appear on genuine block/error pages
-    block_title_markers = [
-        "access denied",
-        "403 forbidden",
-        "error 403",
-        "request blocked",
-        "attention required",  # Cloudflare block page
-    ]
-    block_body_markers = [
-        "access denied",
-        "you don't have permission to access",
-        "your request has been blocked",
-        "this site is protected by",  # generic WAF message
-        "enable cookies and reload",  # often appears on LG block pages
-        "ray id",  # Cloudflare block fingerprint
-    ]
-
-    if any(m in title for m in block_title_markers):
-        return True
-    if any(m in page_text for m in block_body_markers):
-        return True
-    return False
-
-
 def capture_full_page(url: str, subsidiary_code: str, mode: str) -> str:
-    output_dir = "captures"
-    os.makedirs(output_dir, exist_ok=True)
-    debug_dir = os.path.join(output_dir, "debug")
-    os.makedirs(debug_dir, exist_ok=True)
+    """Capture a full-page screenshot of an LG.com Member Days page and return the saved path."""
 
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"{subsidiary_code}_{mode}_prememberdays_{timestamp}.png"
-    output_path = os.path.join(output_dir, filename)
-
-    is_mobile = mode == "mobile"
-    # 1920p desktop / iPhone standard — 2× DPR gives 3840px wide (4K), visually
-    # sharp and typically 3–5 MB per page, well under PIL's 178 MP safety limit.
-    viewport = {"width": 1920, "height": 1080} if not is_mobile else {"width": 390, "height": 844}
-    profiles = [
-        {
-            "name": "win_en",
-            "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
-            "locale": "en-US",
-            "timezone": "America/New_York",
-            "sec_ch_ua": '"Not A(Brand";v="99", "Google Chrome";v="121", "Chromium";v="121"',
-            "sec_ch_ua_mobile": "?1" if is_mobile else "?0",
-            "sec_ch_ua_platform": '"Windows"',
-        },
-        {
-            "name": "mac_en",
-            "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_5) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-            "locale": "en-GB",
-            "timezone": "Europe/London",
-            "sec_ch_ua": '"Not A(Brand";v="99", "Google Chrome";v="124", "Chromium";v="124"',
-            "sec_ch_ua_mobile": "?1" if is_mobile else "?0",
-            "sec_ch_ua_platform": '"macOS"',
-        },
-        {
-            "name": "win_en_v2",
-            "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-            "locale": "en-US",
-            "timezone": "America/Chicago",
-            "sec_ch_ua": '"Not A(Brand";v="99", "Google Chrome";v="122", "Chromium";v="122"',
-            "sec_ch_ua_mobile": "?1" if is_mobile else "?0",
-            "sec_ch_ua_platform": '"Windows"',
-        },
-    ]
-
-    last_error = ""
-    access_denied_debugs: list[str] = []
-
-    with sync_playwright() as playwright:
-        for profile in profiles:
-            browser = playwright.chromium.launch(
-                headless=True,
-                args=[
-                    "--no-sandbox",
-                    "--disable-blink-features=AutomationControlled",
-                    "--disable-infobars",
-                    "--disable-dev-shm-usage",
-                    "--disable-gpu",
-                    "--disable-extensions",
-                    "--start-maximized",
-                    "--force-device-scale-factor=2",  # 2× DPR → 3840px wide (4K)
-                ],
-            )
-            context = browser.new_context(
-                viewport=viewport,
-                device_scale_factor=2,  # Retina/4K quality without excessive file size
-                user_agent=profile["user_agent"],
-                locale=profile["locale"],
-                timezone_id=profile["timezone"],
-                extra_http_headers={
-                    "Upgrade-Insecure-Requests": "1",
-                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-                    "Accept-Language": profile["locale"].replace("-", ",") + ";q=0.9",
-                    "Sec-Ch-Ua": profile["sec_ch_ua"],
-                    "Sec-Ch-Ua-Mobile": profile["sec_ch_ua_mobile"],
-                    "Sec-Ch-Ua-Platform": profile["sec_ch_ua_platform"],
-                    "Sec-Fetch-Dest": "document",
-                    "Sec-Fetch-Mode": "navigate",
-                    "Sec-Fetch-Site": "none",
-                    "Sec-Fetch-User": "?1",
-                },
-            )
-            # Stealth: hide webdriver fingerprint
-            context.add_init_script(_STEALTH_INIT_SCRIPT)
-            page = context.new_page()
-
-            # Block known chat/analytics endpoints that trigger bot detection
-            def _block_chat(route):
-                u = route.request.url.lower()
-                if any(k in u for k in ["genesys", "liveperson", "salesforceliveagent", "adobe-privacy", "chatbot", "proactive-chat"]):
-                    route.abort()
-                else:
-                    route.continue_()
-            page.route("**/*", _block_chat)
-
-            try:
-                # Mouse jitter before navigation to appear human
-                page.mouse.move(random.randint(0, 500), random.randint(0, 300))
-
-                response = page.goto(url, wait_until="domcontentloaded", timeout=120000)
-                status_code = response.status if response else None
-
-                # More mouse jitter after page load
-                page.mouse.move(random.randint(100, 800), random.randint(100, 600))
-
-                try:
-                    accept_btn = page.locator("#onetrust-accept-btn-handler")
-                    if accept_btn.is_visible(timeout=5000):
-                        accept_btn.click()
-                        time.sleep(0.5)
-                except Exception:
-                    pass
-
-                # === TILED CAPTURE: scroll, load, screenshot per viewport tile, stitch ===
-                # Chromium has a ~16384 px texture limit at device-pixel level.
-                # At 2× DPR that's ~8192 CSS px.  For taller pages, DPR is
-                # reduced to 1× automatically.  We resize the viewport to the full
-                # page height and take a single screenshot — no tiling needed.
-
-                # 1. Wait for initial page load
-                try:
-                    page.wait_for_load_state("load", timeout=30000)
-                except Exception:
-                    pass
-                try:
-                    page.wait_for_load_state("networkidle", timeout=15000)
-                except Exception:
-                    pass
-
-                vp_w = viewport["width"]
-                vp_h = viewport["height"]
-
-                def _force_lazy():
-                    page.evaluate("""() => {
-                        document.querySelectorAll('img, source, video, picture').forEach(el => {
-                            if ('loading' in el) el.loading = 'eager';
-                            ['data-src','data-lazy-src','data-original','data-lazy'].forEach(a => {
-                                const v = el.getAttribute(a);
-                                if (v) el.setAttribute('src', v);
-                            });
-                            ['data-srcset','data-lazy-srcset'].forEach(a => {
-                                const v = el.getAttribute(a);
-                                if (v) el.setAttribute('srcset', v);
-                            });
-                        });
-                    }""")
-
-                def _wait_images():
-                    page.evaluate("""async () => {
-                        await Promise.all(Array.from(document.images).map(img => {
-                            if (img.complete) return;
-                            return new Promise(r => {
-                                img.onload = img.onerror = r;
-                                setTimeout(r, 8000);
-                            });
-                        }));
-                    }""")
-
-                # 2. First slow scroll to trigger IntersectionObservers + lazy loads
-                doc_h = page.evaluate(
-                    "() => Math.max(document.body.scrollHeight, document.documentElement.scrollHeight)"
-                )
-                step = int(vp_h * 0.7)
-                pos = 0
-                while pos < doc_h:
-                    page.evaluate(f"window.scrollTo(0, {pos})")
-                    _force_lazy()
-                    time.sleep(0.5)
-                    pos += step
-                    # re-measure in case page grew
-                    doc_h = min(
-                        page.evaluate("() => Math.max(document.body.scrollHeight, document.documentElement.scrollHeight)"),
-                        doc_h + vp_h * 3  # cap growth
-                    )
-
-                # 3. Sit at bottom, force lazy, wait for images
-                page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                _force_lazy()
-                try:
-                    page.wait_for_load_state("networkidle", timeout=20000)
-                except Exception:
-                    pass
-                _wait_images()
-                time.sleep(1)
-
-                # 4. Final page height
-                total_h = page.evaluate(
-                    "() => Math.max(document.body.scrollHeight, document.documentElement.scrollHeight)"
-                )
-
-                # 5. Clean up overlays and force-reveal hidden content
-                page_cleanup(page)
-                time.sleep(1)
-
-                if is_access_denied_page(page):
-                    debug_base = os.path.join(debug_dir, f"{subsidiary_code}_{mode}_{profile['name']}_{timestamp}")
-                    debug_png = f"{debug_base}.png"
-                    debug_html = f"{debug_base}.html"
-                    page.screenshot(path=debug_png, full_page=True, type="png")
-                    with open(debug_html, "w", encoding="utf-8") as fp:
-                        fp.write(page.content())
-                    access_denied_debugs.append(debug_png)
-                    continue
-
-                if status_code and status_code >= 400:
-                    raise RuntimeError(
-                        f"LG page returned HTTP {status_code} for {url}. "
-                        "This subsidiary may not have a prememberdays page."
-                    )
-
-                # 6. Tiled capture — viewport-only screenshots, stitched with Pillow.
-                #    This avoids the Chromium ~16384 device-px texture limit AND
-                #    doesn't resize the viewport (preserving 100vh layouts).
-                #
-                #    Fixed/sticky elements (nav bars, floating buttons) are hidden
-                #    with display:none SYNCHRONOUSLY before each non-first tile so
-                #    they only appear once at the top.  The synchronous evaluate()
-                #    call is more reliable than MutationObserver because LG's scroll
-                #    JS re-applies position:fixed on every scroll event.
-                from PIL import Image as PILImage
-                import io
-
-                # Hide the navigation bar ONCE before tiling.
-                # Target: position:fixed elements anchored to the top of the
-                # viewport (top ≤ 5px).  These are always nav bars / sticky
-                # headers — never hero content.  Use display:none to fully
-                # remove (no borders, pseudo-elements, or child bleed-through).
-                page.evaluate("""() => {
-                    const style = document.createElement('style');
-                    style.setAttribute('data-capture-hide-nav', 'true');
-                    // LG common nav selectors (fallback)
-                    style.innerHTML = `
-                        .__cap_hide_nav {
-                            display: none !important;
-                        }
-                    `;
-                    document.head.appendChild(style);
-
-                    document.querySelectorAll('*').forEach(el => {
-                        const cs = window.getComputedStyle(el);
-                        if (cs.position === 'fixed' || cs.position === 'sticky') {
-                            const rect = el.getBoundingClientRect();
-                            // Fixed/sticky to top of viewport and narrow (nav/header/toolbar)
-                            if (rect.top <= 5 && rect.height > 0 && rect.height < 200) {
-                                el.classList.add('__cap_hide_nav');
-                            }
-                        }
-                    });
-                }""")
-                time.sleep(0.3)
-
-                # Re-measure height after hiding nav (page may shrink slightly)
-                total_h = page.evaluate(
-                    "() => Math.max(document.body.scrollHeight, document.documentElement.scrollHeight)"
-                )
-
-                page.evaluate("window.scrollTo(0, 0)")
-                time.sleep(0.5)
-
-                tiles: list = []
-                y = 0
-                while y < total_h:
-                    page.evaluate(f"window.scrollTo(0, {y})")
-                    time.sleep(0.4)
-
-                    tile_h = min(vp_h, total_h - y)
-                    tile_bytes = page.screenshot(
-                        type="png",
-                        scale="device",
-                        clip={"x": 0, "y": 0, "width": vp_w, "height": tile_h},
-                    )
-                    tiles.append((y, PILImage.open(io.BytesIO(tile_bytes))))
-                    y += vp_h
-
-                # 8. Stitch tiles
-                dpr = 2
-                stitched = PILImage.new("RGB", (vp_w * dpr, total_h * dpr))
-                for css_y, tile_img in tiles:
-                    stitched.paste(tile_img, (0, css_y * dpr))
-
-                stitched.save(output_path, format="PNG")
-                return output_path
-            except Exception as exc:
-                last_error = str(exc)
-            finally:
-                context.close()
-                browser.close()
-
-    if access_denied_debugs:
-        raise RuntimeError(
-            "LG returned access denied for all retry profiles in this environment. "
-            f"Diagnostic screenshots saved under: {debug_dir}"
+    if mode == "mobile":
+        viewport = {"width": 390, "height": 844}
+        device_scale_factor = 2
+        is_mobile = True
+        user_agent = (
+            "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
+            "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
         )
-    if last_error:
-        raise RuntimeError(last_error)
-    raise RuntimeError("Capture failed for an unknown reason.")
+    else:
+        viewport = {"width": 1920, "height": 1080}
+        device_scale_factor = 1
+        is_mobile = False
+        user_agent = (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+        )
+
+    os.makedirs("captures", exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"{subsidiary_code}_{mode}_{timestamp}.png"
+    output_path = os.path.join("captures", filename)
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(
+            headless=True,
+            args=[
+                "--no-sandbox",
+                "--disable-setuid-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-blink-features=AutomationControlled",
+                "--ignore-certificate-errors",
+            ],
+        )
+
+        context = browser.new_context(
+            viewport=viewport,
+            device_scale_factor=device_scale_factor,
+            is_mobile=is_mobile,
+            user_agent=user_agent,
+            locale="en-US",
+            ignore_https_errors=True,
+        )
+        # Execute the stealth patches as an IIFE so the body actually runs
+        context.add_init_script(f"({_STEALTH_INIT_SCRIPT})()")
+
+        page = context.new_page()
+        page.goto(url, wait_until="domcontentloaded", timeout=60_000)
+
+        # Let the page settle after the initial DOM load
+        try:
+            page.wait_for_load_state("networkidle", timeout=20_000)
+        except Exception:
+            page.wait_for_timeout(3_000)
+
+        # ── Dismiss OneTrust cookie / consent banner ──────────────────────────
+        for selector in [
+            "#onetrust-accept-btn-handler",
+            "#accept-recommended-btn-handler",
+            "button.onetrust-accept-btn-handler",
+        ]:
+            try:
+                btn = page.locator(selector)
+                btn.wait_for(state="visible", timeout=4_000)
+                btn.click()
+                page.wait_for_timeout(800)
+                break
+            except Exception:
+                continue
+
+        # ── Scroll through to trigger lazy-loaded images/components ──────────
+        total_height: int = page.evaluate("document.body.scrollHeight")
+        step = viewport["height"]
+        pos = 0
+        while pos < total_height:
+            pos += step
+            page.evaluate(f"window.scrollTo(0, {pos})")
+            page.wait_for_timeout(150)
+            # Re-measure in case dynamic content extended the page
+            total_height = page.evaluate("document.body.scrollHeight")
+
+        # Return to the very top before screenshotting
+        page.evaluate("window.scrollTo(0, 0)")
+        page.wait_for_timeout(500)
+
+        # ── Remove floating overlays that would obscure content ───────────────
+        page.evaluate("""
+            () => {
+                ['onetrust-banner-sdk', 'onetrust-pc-dark-filter'].forEach(id => {
+                    const el = document.getElementById(id);
+                    if (el) el.remove();
+                });
+                document.querySelectorAll(
+                    '[id*="chat"], [class*="chat-widget"], [class*="livechat"], ' +
+                    '[class*="helpdesk"], [id*="launcher"]'
+                ).forEach(el => { el.style.display = 'none'; });
+            }
+        """)
+        page.wait_for_timeout(300)
+
+        # ── Full-page screenshot ──────────────────────────────────────────────
+        page.screenshot(path=output_path, full_page=True, type="png")
+
+        context.close()
+        browser.close()
+
+    return output_path
 
 
 def main() -> None:
