@@ -304,14 +304,10 @@ def upload_to_cloudinary(file_path: str, subsidiary_code: str, mode: str) -> str
     if not all([cloud_name, api_key, api_secret]):
         return None
 
-    # Resize PNG to 2560px wide (from 3840px 2×DPR) — lossless, ~4MB, still 2.5K crisp
+    # Full 3840px PNG with max zlib compression (level 9) — lossless, ~10% smaller than default
     img = Image.open(file_path).convert("RGB")
-    target_w = 2560
-    if img.width > target_w:
-        ratio = target_w / img.width
-        img = img.resize((target_w, int(img.height * ratio)), Image.LANCZOS)
     buf = io.BytesIO()
-    img.save(buf, format="PNG")
+    img.save(buf, format="PNG", compress_level=9)
     buf.seek(0)
 
     timestamp = int(time.time())
@@ -619,7 +615,7 @@ def capture_full_page(url: str, subsidiary_code: str, mode: str) -> str:
                         });
                     }
                 """)
-                time.sleep(0.5)
+                time.sleep(3)
 
                 if is_access_denied_page(page):
                     debug_base = os.path.join(debug_dir, f"{subsidiary_code}_{mode}_{profile['name']}_{timestamp}")
