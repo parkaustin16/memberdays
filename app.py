@@ -707,51 +707,15 @@ def capture_full_page(url: str, subsidiary_code: str, mode: str) -> str:
                         "This subsidiary may not have a prememberdays page."
                     )
 
-                # 6. Neutralise fixed/sticky elements BEFORE capture.
-                #    Convert to position:absolute so the nav stays at doc-flow
-                #    position (top of page) and doesn't float over every tile.
-                #    Use BOTH a <style> tag (survives mutations) AND inline styles,
-                #    plus a MutationObserver to catch any JS that re-applies fixed.
-                page.evaluate("""() => {
-                    // Tag every currently fixed/sticky element
-                    document.querySelectorAll('*').forEach(el => {
-                        const pos = window.getComputedStyle(el).position;
-                        if (pos === 'fixed' || pos === 'sticky') {
-                            el.classList.add('__cap_was_fixed');
-                            el.style.setProperty('position', 'absolute', 'important');
-                        }
-                    });
-
-                    // Inject a stylesheet that enforces the override
-                    const s = document.createElement('style');
-                    s.textContent = `
-                        .__cap_was_fixed {
-                            position: absolute !important;
-                        }
-                    `;
-                    document.head.appendChild(s);
-
-                    // MutationObserver: catch any element that becomes fixed/sticky
-                    // after our initial pass (LG JS scroll handlers etc.)
-                    const mo = new MutationObserver(() => {
-                        document.querySelectorAll('*').forEach(el => {
-                            const p = window.getComputedStyle(el).position;
-                            if (p === 'fixed' || p === 'sticky') {
-                                el.classList.add('__cap_was_fixed');
-                                el.style.setProperty('position', 'absolute', 'important');
-                            }
-                        });
-                    });
-                    mo.observe(document.documentElement, {
-                        childList: true, subtree: true,
-                        attributes: true, attributeFilter: ['style', 'class']
-                    });
-                }""")
-                time.sleep(0.3)
-
-                # 7. Tiled capture — viewport-only screenshots, stitched with Pillow.
+                # 6. Tiled capture — viewport-only screenshots, stitched with Pillow.
                 #    This avoids the Chromium ~16384 device-px texture limit AND
                 #    doesn't resize the viewport (preserving 100vh layouts).
+                #
+                #    Fixed/sticky elements (nav bars, floating buttons) are hidden
+                #    with display:none SYNCHRONOUSLY before each non-first tile so
+                #    they only appear once at the top.  The synchronous evaluate()
+                #    call is more reliable than MutationObserver because LG's scroll
+                #    JS re-applies position:fixed on every scroll event.
                 from PIL import Image as PILImage
                 import io
 
@@ -763,6 +727,19 @@ def capture_full_page(url: str, subsidiary_code: str, mode: str) -> str:
                 while y < total_h:
                     page.evaluate(f"window.scrollTo(0, {y})")
                     time.sleep(0.35)
+
+                    # Hide fixed/sticky elements for all tiles after the first one.
+                    # This prevents the nav bar from appearing in every tile.
+                    # Runs synchronously — guaranteed to complete before screenshot.
+                    if y > 0:
+                        page.evaluate("""() => {
+                            document.querySelectorAll('*').forEach(el => {
+                                const pos = window.getComputedStyle(el).position;
+                                if (pos === 'fixed' || pos === 'sticky') {
+                                    el.style.setProperty('display', 'none', 'important');
+                                }
+                            });
+                        }""")
 
                     tile_h = min(vp_h, total_h - y)
                     tile_bytes = page.screenshot(
