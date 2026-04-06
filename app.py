@@ -594,39 +594,41 @@ def capture_full_page(url: str, subsidiary_code: str, mode: str) -> str:
 
                 page_cleanup(page)
 
-                # Scroll through the full page to trigger lazy-loaded sections
-                page.evaluate("""
-                    async () => {
-                        await new Promise(resolve => {
-                            const step = Math.max(300, window.innerHeight * 0.8);
-                            let pos = 0;
-                            const interval = setInterval(() => {
-                                window.scrollTo(0, pos);
-                                pos += step;
-                                if (pos >= document.body.scrollHeight) {
-                                    clearInterval(interval);
-                                    resolve();
-                                }
-                            }, 120);
-                        });
-                    }
-                """)
+                # Scroll in Python-controlled steps so each section has time to load
+                total_height = page.evaluate("document.body.scrollHeight")
+                viewport_h = page.evaluate("window.innerHeight")
+                step = int(viewport_h * 0.8)
+                pos = 0
+                while pos < total_height:
+                    page.evaluate(f"window.scrollTo(0, {pos})")
+                    time.sleep(0.4)
+                    # Update total height in case new content was injected
+                    total_height = page.evaluate("document.body.scrollHeight")
+                    pos += step
 
-                # Wait for lazy-loaded images to finish loading after scroll
+                # Wait for all network requests triggered by scrolling to finish
                 try:
-                    page.wait_for_load_state("networkidle", timeout=20000)
+                    page.wait_for_load_state("networkidle", timeout=25000)
                 except Exception:
                     pass
 
-                # Force any remaining lazy images to load
+                # Force any remaining data-src / lazy images to load
                 page.evaluate("""
                     () => {
-                        document.querySelectorAll('img[loading="lazy"]').forEach(img => {
+                        document.querySelectorAll('img').forEach(img => {
                             img.loading = 'eager';
-                            if (img.dataset.src) img.src = img.dataset.src;
+                            if (img.dataset.src && !img.src) img.src = img.dataset.src;
+                            if (img.dataset.lazySrc) img.src = img.dataset.lazySrc;
                         });
                     }
                 """)
+
+                # Second networkidle after forcing lazy images
+                try:
+                    page.wait_for_load_state("networkidle", timeout=15000)
+                except Exception:
+                    pass
+
 
                 # Scroll back to top and wait for the page to settle before capture
                 page.evaluate("window.scrollTo(0, 0)")
