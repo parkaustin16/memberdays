@@ -707,35 +707,79 @@ def capture_full_page(url: str, subsidiary_code: str, mode: str) -> str:
                         "This subsidiary may not have a prememberdays page."
                     )
 
-                # 6. Hide fixed/sticky elements so they don't float over content
+                # 6. Neutralise fixed/sticky elements BEFORE capture.
+                #    Convert to position:absolute so the nav stays at doc-flow
+                #    position (top of page) and doesn't float over every tile.
+                #    Use BOTH a <style> tag (survives mutations) AND inline styles,
+                #    plus a MutationObserver to catch any JS that re-applies fixed.
                 page.evaluate("""() => {
+                    // Tag every currently fixed/sticky element
                     document.querySelectorAll('*').forEach(el => {
                         const pos = window.getComputedStyle(el).position;
                         if (pos === 'fixed' || pos === 'sticky') {
+                            el.classList.add('__cap_was_fixed');
                             el.style.setProperty('position', 'absolute', 'important');
                         }
                     });
+
+                    // Inject a stylesheet that enforces the override
+                    const s = document.createElement('style');
+                    s.textContent = `
+                        .__cap_was_fixed {
+                            position: absolute !important;
+                        }
+                    `;
+                    document.head.appendChild(s);
+
+                    // MutationObserver: catch any element that becomes fixed/sticky
+                    // after our initial pass (LG JS scroll handlers etc.)
+                    const mo = new MutationObserver(() => {
+                        document.querySelectorAll('*').forEach(el => {
+                            const p = window.getComputedStyle(el).position;
+                            if (p === 'fixed' || p === 'sticky') {
+                                el.classList.add('__cap_was_fixed');
+                                el.style.setProperty('position', 'absolute', 'important');
+                            }
+                        });
+                    });
+                    mo.observe(document.documentElement, {
+                        childList: true, subtree: true,
+                        attributes: true, attributeFilter: ['style', 'class']
+                    });
                 }""")
+                time.sleep(0.3)
 
-                # 7. Scroll to top and capture with full_page=True.
-                #    DO NOT resize the viewport — that breaks vh-based layouts
-                #    (hero banners, 100vh sections stretch to absurd heights).
-                #    Playwright's full_page=True captures internally without
-                #    changing the CSS viewport the page sees.
+                # 7. Tiled capture — viewport-only screenshots, stitched with Pillow.
+                #    This avoids the Chromium ~16384 device-px texture limit AND
+                #    doesn't resize the viewport (preserving 100vh layouts).
+                from PIL import Image as PILImage
+                import io
+
                 page.evaluate("window.scrollTo(0, 0)")
-                time.sleep(1)
+                time.sleep(0.5)
 
-                # One more lazy-load + image wait pass
-                _force_lazy()
-                _wait_images()
-                time.sleep(1)
+                tiles: list = []
+                y = 0
+                while y < total_h:
+                    page.evaluate(f"window.scrollTo(0, {y})")
+                    time.sleep(0.35)
 
-                page.screenshot(
-                    path=output_path,
-                    full_page=True,
-                    type="png",
-                    scale="device",
-                )
+                    tile_h = min(vp_h, total_h - y)
+                    tile_bytes = page.screenshot(
+                        type="png",
+                        scale="device",
+                        clip={"x": 0, "y": 0, "width": vp_w, "height": tile_h},
+                    )
+                    tiles.append((y, PILImage.open(io.BytesIO(tile_bytes))))
+                    y += vp_h
+
+                # 8. Stitch tiles
+                dpr = 2
+                stitched = PILImage.new("RGB", (vp_w * dpr, total_h * dpr))
+                for css_y, tile_img in tiles:
+                    stitched.paste(tile_img, (0, css_y * dpr))
+
+                stitched.save(output_path, format="PNG")
                 return output_path
             except Exception as exc:
                 last_error = str(exc)
