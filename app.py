@@ -294,8 +294,6 @@ def resolve_target_url(subsidiary_code: str) -> tuple[str, int]:
 def upload_to_cloudinary(file_path: str, subsidiary_code: str, mode: str) -> str | None:
     """Upload screenshot to Cloudinary and return the secure URL, or None on failure."""
     import hashlib
-    import io
-    from PIL import Image
 
     cloud_name = _secret("CLOUDINARY_CLOUD_NAME")
     api_key = _secret("CLOUDINARY_API_KEY")
@@ -303,12 +301,6 @@ def upload_to_cloudinary(file_path: str, subsidiary_code: str, mode: str) -> str
 
     if not all([cloud_name, api_key, api_secret]):
         return None
-
-    # Full 3840px PNG with max zlib compression (level 9) — lossless, ~10% smaller than default
-    img = Image.open(file_path).convert("RGB")
-    buf = io.BytesIO()
-    img.save(buf, format="PNG", compress_level=9)
-    buf.seek(0)
 
     timestamp = int(time.time())
     folder = f"memberdays/{subsidiary_code}/{mode}"
@@ -323,9 +315,10 @@ def upload_to_cloudinary(file_path: str, subsidiary_code: str, mode: str) -> str
     sign_str = "&".join(f"{k}={v}" for k, v in sign_params) + api_secret
     signature = hashlib.sha1(sign_str.encode()).hexdigest()
 
-    resp = requests.post(
+    with open(file_path, "rb") as f:
+        resp = requests.post(
             f"https://api.cloudinary.com/v1_1/{cloud_name}/image/upload",
-            files={"file": (os.path.basename(file_path), buf, "image/png")},
+            files={"file": f},
             data={
                 "api_key": api_key,
                 "timestamp": timestamp,
@@ -480,123 +473,6 @@ def is_access_denied_page(page) -> bool:
     return False
 
 
-def _document_height(page) -> int:
-    return int(
-        page.evaluate(
-            """
-            () => Math.max(
-                document.body ? document.body.scrollHeight : 0,
-                document.documentElement ? document.documentElement.scrollHeight : 0,
-                document.body ? document.body.offsetHeight : 0,
-                document.documentElement ? document.documentElement.offsetHeight : 0
-            )
-            """
-        )
-    )
-
-
-def _prepare_lazy_assets(page) -> None:
-    page.evaluate(
-        """
-        () => {
-            document.querySelectorAll('img, source, video').forEach((node) => {
-                if ('loading' in node) {
-                    node.loading = 'eager';
-                }
-
-                const dataSrc = node.dataset ? (node.dataset.src || node.dataset.lazySrc || node.dataset.original) : null;
-                const dataSrcset = node.dataset ? (node.dataset.srcset || node.dataset.lazySrcset) : null;
-
-                if (dataSrc && !node.getAttribute('src')) {
-                    node.setAttribute('src', dataSrc);
-                }
-                if (dataSrcset && !node.getAttribute('srcset')) {
-                    node.setAttribute('srcset', dataSrcset);
-                }
-                if (node.tagName === 'VIDEO' && node.dataset && node.dataset.poster && !node.poster) {
-                    node.poster = node.dataset.poster;
-                }
-            });
-        }
-        """
-    )
-
-
-def _wait_for_assets(page, timeout_ms: int = 15000) -> None:
-    try:
-        page.wait_for_load_state("load", timeout=timeout_ms)
-    except Exception:
-        pass
-
-    try:
-        page.wait_for_load_state("networkidle", timeout=timeout_ms)
-    except Exception:
-        pass
-
-    try:
-        page.evaluate(
-            """
-            async () => {
-                if (document.fonts && document.fonts.ready) {
-                    try {
-                        await document.fonts.ready;
-                    } catch (e) {
-                    }
-                }
-
-                const waitForImage = (img) => {
-                    if (img.complete) {
-                        return Promise.resolve();
-                    }
-                    return new Promise((resolve) => {
-                        const done = () => resolve();
-                        img.addEventListener('load', done, { once: true });
-                        img.addEventListener('error', done, { once: true });
-                        setTimeout(done, 5000);
-                    });
-                };
-
-                await Promise.all(Array.from(document.images).map(waitForImage));
-            }
-            """
-        )
-    except Exception:
-        pass
-
-
-def _prime_page_for_capture(page) -> int:
-    initial_height = _document_height(page)
-    viewport_h = int(page.evaluate("() => window.innerHeight || 1080"))
-    step = max(int(viewport_h * 0.85), 400)
-    max_height = int(initial_height * 1.12)
-    target_height = initial_height
-
-    _prepare_lazy_assets(page)
-    _wait_for_assets(page)
-
-    for _ in range(2):
-        pos = 0
-        while pos < target_height:
-            page.evaluate("(y) => window.scrollTo(0, y)", pos)
-            time.sleep(0.3)
-            pos += step
-
-        _prepare_lazy_assets(page)
-        _wait_for_assets(page, timeout_ms=12000)
-
-        new_height = _document_height(page)
-        bounded_height = min(new_height, max_height)
-        if bounded_height <= target_height + max(200, int(viewport_h * 0.25)):
-            target_height = bounded_height
-            break
-        target_height = bounded_height
-
-    page.evaluate("() => window.scrollTo(0, 0)")
-    _wait_for_assets(page, timeout_ms=10000)
-    time.sleep(3)
-    return max(target_height, viewport_h)
-
-
 def capture_full_page(url: str, subsidiary_code: str, mode: str) -> str:
     output_dir = "captures"
     os.makedirs(output_dir, exist_ok=True)
@@ -656,12 +532,12 @@ def capture_full_page(url: str, subsidiary_code: str, mode: str) -> str:
                     "--disable-gpu",
                     "--disable-extensions",
                     "--start-maximized",
-                    "--force-device-scale-factor=2",
+                    "--force-device-scale-factor=2",  # 2× DPR → 3840px wide (4K)
                 ],
             )
             context = browser.new_context(
                 viewport=viewport,
-                device_scale_factor=2,
+                device_scale_factor=2,  # Retina/4K quality without excessive file size
                 user_agent=profile["user_agent"],
                 locale=profile["locale"],
                 timezone_id=profile["timezone"],
@@ -678,33 +554,27 @@ def capture_full_page(url: str, subsidiary_code: str, mode: str) -> str:
                     "Sec-Fetch-User": "?1",
                 },
             )
+            # Stealth: hide webdriver fingerprint
             context.add_init_script(_STEALTH_INIT_SCRIPT)
             page = context.new_page()
 
+            # Block known chat/analytics endpoints that trigger bot detection
             def _block_chat(route):
-                request_url = route.request.url.lower()
-                if any(
-                    key in request_url
-                    for key in [
-                        "genesys",
-                        "liveperson",
-                        "salesforceliveagent",
-                        "adobe-privacy",
-                        "chatbot",
-                        "proactive-chat",
-                    ]
-                ):
+                u = route.request.url.lower()
+                if any(k in u for k in ["genesys", "liveperson", "salesforceliveagent", "adobe-privacy", "chatbot", "proactive-chat"]):
                     route.abort()
                 else:
                     route.continue_()
-
             page.route("**/*", _block_chat)
 
             try:
+                # Mouse jitter before navigation to appear human
                 page.mouse.move(random.randint(0, 500), random.randint(0, 300))
-                response = page.goto(url, wait_until="load", timeout=120000)
+
+                response = page.goto(url, wait_until="domcontentloaded", timeout=120000)
                 status_code = response.status if response else None
 
+                # More mouse jitter after page load
                 page.mouse.move(random.randint(100, 800), random.randint(100, 600))
 
                 try:
@@ -716,7 +586,29 @@ def capture_full_page(url: str, subsidiary_code: str, mode: str) -> str:
                     pass
 
                 page_cleanup(page)
-                capture_height = _prime_page_for_capture(page)
+
+                # Wait for all network activity to settle so images are fully loaded
+                try:
+                    page.wait_for_load_state("networkidle", timeout=15000)
+                except Exception:
+                    pass  # Proceed even if some requests never settle
+
+                # Force all images to render at crisp full resolution
+                page.evaluate("""
+                    () => {
+                        document.querySelectorAll('img').forEach(img => {
+                            img.style.imageRendering = 'auto';
+                            img.decoding = 'sync';
+                            if (img.loading === 'lazy') {
+                                img.loading = 'eager';
+                                const src = img.src;
+                                img.src = '';
+                                img.src = src;
+                            }
+                        });
+                    }
+                """)
+                time.sleep(0.5)
 
                 if is_access_denied_page(page):
                     debug_base = os.path.join(debug_dir, f"{subsidiary_code}_{mode}_{profile['name']}_{timestamp}")
@@ -734,16 +626,12 @@ def capture_full_page(url: str, subsidiary_code: str, mode: str) -> str:
                         "This subsidiary may not have a prememberdays page."
                     )
 
+                # PNG is lossless; omit quality param (only applies to jpeg)
                 page.screenshot(
                     path=output_path,
+                    full_page=True,
                     type="png",
-                    scale="device",
-                    clip={
-                        "x": 0,
-                        "y": 0,
-                        "width": viewport["width"],
-                        "height": capture_height,
-                    },
+                    scale="device",  # honours the 3× device_scale_factor
                 )
                 return output_path
             except Exception as exc:
