@@ -426,19 +426,7 @@ def page_cleanup(page) -> None:
             `;
             document.head.appendChild(overlayStyle);
 
-            // 2. Force ALL elements to be visible — counteracts scroll-triggered
-            //    fade-in animations that may not have completed
-            document.querySelectorAll('*').forEach(el => {
-                const cs = window.getComputedStyle(el);
-                if (cs.opacity === '0' || cs.opacity === '0.0') {
-                    el.style.opacity = '1';
-                }
-                if (cs.visibility === 'hidden') {
-                    el.style.visibility = 'visible';
-                }
-            });
-
-            // 3. NOW freeze animations so nothing moves during the screenshot
+            // 2. Freeze animations so nothing moves during the screenshot
             const freezeStyle = document.createElement('style');
             freezeStyle.setAttribute('data-capture-freeze', 'true');
             freezeStyle.innerHTML = `
@@ -719,6 +707,40 @@ def capture_full_page(url: str, subsidiary_code: str, mode: str) -> str:
                 from PIL import Image as PILImage
                 import io
 
+                # Hide the navigation bar ONCE before tiling.
+                # Target: position:fixed elements anchored to the top of the
+                # viewport (top ≤ 5px).  These are always nav bars / sticky
+                # headers — never hero content.  Use display:none to fully
+                # remove (no borders, pseudo-elements, or child bleed-through).
+                page.evaluate("""() => {
+                    const style = document.createElement('style');
+                    style.setAttribute('data-capture-hide-nav', 'true');
+                    // LG common nav selectors (fallback)
+                    style.innerHTML = `
+                        .__cap_hide_nav {
+                            display: none !important;
+                        }
+                    `;
+                    document.head.appendChild(style);
+
+                    document.querySelectorAll('*').forEach(el => {
+                        const cs = window.getComputedStyle(el);
+                        if (cs.position === 'fixed') {
+                            const rect = el.getBoundingClientRect();
+                            // Fixed to top of viewport and narrow (nav/header/toolbar)
+                            if (rect.top <= 5 && rect.height > 0 && rect.height < 200) {
+                                el.classList.add('__cap_hide_nav');
+                            }
+                        }
+                    });
+                }""")
+                time.sleep(0.3)
+
+                # Re-measure height after hiding nav (page may shrink slightly)
+                total_h = page.evaluate(
+                    "() => Math.max(document.body.scrollHeight, document.documentElement.scrollHeight)"
+                )
+
                 page.evaluate("window.scrollTo(0, 0)")
                 time.sleep(0.5)
 
@@ -726,27 +748,7 @@ def capture_full_page(url: str, subsidiary_code: str, mode: str) -> str:
                 y = 0
                 while y < total_h:
                     page.evaluate(f"window.scrollTo(0, {y})")
-                    time.sleep(0.35)
-
-                    # Hide ONLY nav-bar-like fixed/sticky elements for tiles 2+.
-                    # Nav bars are small (< 300 CSS-px tall) and sit at the top of
-                    # the viewport.  Content sections (hero banners, floating text
-                    # overlays) are taller and must NOT be hidden.
-                    # Use visibility:hidden (not display:none) so document flow and
-                    # sizing are unaffected — fixed elements don't participate in
-                    # flow anyway.
-                    if y > 0:
-                        page.evaluate("""() => {
-                            document.querySelectorAll('*').forEach(el => {
-                                const pos = window.getComputedStyle(el).position;
-                                if (pos === 'fixed' || pos === 'sticky') {
-                                    const rect = el.getBoundingClientRect();
-                                    if (rect.height < 300) {
-                                        el.style.setProperty('visibility', 'hidden', 'important');
-                                    }
-                                }
-                            });
-                        }""")
+                    time.sleep(0.4)
 
                     tile_h = min(vp_h, total_h - y)
                     tile_bytes = page.screenshot(
