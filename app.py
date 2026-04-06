@@ -426,12 +426,16 @@ def page_cleanup(page) -> None:
             `;
             document.head.appendChild(overlayStyle);
 
-            // 2. Freeze animations so nothing moves during the screenshot
+            // 2. Freeze animations at their CURRENT frame so nothing moves
+            //    during the screenshot.  Using animation-play-state:paused
+            //    instead of animation:none — the latter removes animations
+            //    entirely, snapping elements (like hero-banner floating text)
+            //    back to their initial CSS position and jumbling the layout.
             const freezeStyle = document.createElement('style');
             freezeStyle.setAttribute('data-capture-freeze', 'true');
             freezeStyle.innerHTML = `
                 *, *::before, *::after {
-                    animation: none !important;
+                    animation-play-state: paused !important;
                     transition: none !important;
                 }
             `;
@@ -725,9 +729,9 @@ def capture_full_page(url: str, subsidiary_code: str, mode: str) -> str:
 
                     document.querySelectorAll('*').forEach(el => {
                         const cs = window.getComputedStyle(el);
-                        if (cs.position === 'fixed') {
+                        if (cs.position === 'fixed' || cs.position === 'sticky') {
                             const rect = el.getBoundingClientRect();
-                            // Fixed to top of viewport and narrow (nav/header/toolbar)
+                            // Fixed/sticky to top of viewport and narrow (nav/header/toolbar)
                             if (rect.top <= 5 && rect.height > 0 && rect.height < 200) {
                                 el.classList.add('__cap_hide_nav');
                             }
