@@ -251,6 +251,13 @@ def get_subsidiary_options() -> list[tuple[str, str]]:
 
 def build_url_candidates(subsidiary_code: str) -> list[str]:
     """Build likely URL variants for prememberdays pages."""
+    # Per-subsidiary overrides (used as the first/only candidate)
+    _overrides: dict[str, str] = {
+        "co": "https://www.lg.com/co/lg-members-days-2026/",
+    }
+    if subsidiary_code in _overrides:
+        return [_overrides[subsidiary_code]]
+
     candidates = [f"https://www.lg.com/{subsidiary_code}/prememberdays/"]
 
     if "_" in subsidiary_code:
