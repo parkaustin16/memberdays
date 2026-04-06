@@ -480,6 +480,123 @@ def is_access_denied_page(page) -> bool:
     return False
 
 
+def _document_height(page) -> int:
+    return int(
+        page.evaluate(
+            """
+            () => Math.max(
+                document.body ? document.body.scrollHeight : 0,
+                document.documentElement ? document.documentElement.scrollHeight : 0,
+                document.body ? document.body.offsetHeight : 0,
+                document.documentElement ? document.documentElement.offsetHeight : 0
+            )
+            """
+        )
+    )
+
+
+def _prepare_lazy_assets(page) -> None:
+    page.evaluate(
+        """
+        () => {
+            document.querySelectorAll('img, source, video').forEach((node) => {
+                if ('loading' in node) {
+                    node.loading = 'eager';
+                }
+
+                const dataSrc = node.dataset ? (node.dataset.src || node.dataset.lazySrc || node.dataset.original) : null;
+                const dataSrcset = node.dataset ? (node.dataset.srcset || node.dataset.lazySrcset) : null;
+
+                if (dataSrc && !node.getAttribute('src')) {
+                    node.setAttribute('src', dataSrc);
+                }
+                if (dataSrcset && !node.getAttribute('srcset')) {
+                    node.setAttribute('srcset', dataSrcset);
+                }
+                if (node.tagName === 'VIDEO' && node.dataset && node.dataset.poster && !node.poster) {
+                    node.poster = node.dataset.poster;
+                }
+            });
+        }
+        """
+    )
+
+
+def _wait_for_assets(page, timeout_ms: int = 15000) -> None:
+    try:
+        page.wait_for_load_state("load", timeout=timeout_ms)
+    except Exception:
+        pass
+
+    try:
+        page.wait_for_load_state("networkidle", timeout=timeout_ms)
+    except Exception:
+        pass
+
+    try:
+        page.evaluate(
+            """
+            async () => {
+                if (document.fonts && document.fonts.ready) {
+                    try {
+                        await document.fonts.ready;
+                    } catch (e) {
+                    }
+                }
+
+                const waitForImage = (img) => {
+                    if (img.complete) {
+                        return Promise.resolve();
+                    }
+                    return new Promise((resolve) => {
+                        const done = () => resolve();
+                        img.addEventListener('load', done, { once: true });
+                        img.addEventListener('error', done, { once: true });
+                        setTimeout(done, 5000);
+                    });
+                };
+
+                await Promise.all(Array.from(document.images).map(waitForImage));
+            }
+            """
+        )
+    except Exception:
+        pass
+
+
+def _prime_page_for_capture(page) -> int:
+    initial_height = _document_height(page)
+    viewport_h = int(page.evaluate("() => window.innerHeight || 1080"))
+    step = max(int(viewport_h * 0.85), 400)
+    max_height = int(initial_height * 1.12)
+    target_height = initial_height
+
+    _prepare_lazy_assets(page)
+    _wait_for_assets(page)
+
+    for _ in range(2):
+        pos = 0
+        while pos < target_height:
+            page.evaluate("(y) => window.scrollTo(0, y)", pos)
+            time.sleep(0.3)
+            pos += step
+
+        _prepare_lazy_assets(page)
+        _wait_for_assets(page, timeout_ms=12000)
+
+        new_height = _document_height(page)
+        bounded_height = min(new_height, max_height)
+        if bounded_height <= target_height + max(200, int(viewport_h * 0.25)):
+            target_height = bounded_height
+            break
+        target_height = bounded_height
+
+    page.evaluate("() => window.scrollTo(0, 0)")
+    _wait_for_assets(page, timeout_ms=10000)
+    time.sleep(3)
+    return max(target_height, viewport_h)
+
+
 def capture_full_page(url: str, subsidiary_code: str, mode: str) -> str:
     output_dir = "captures"
     os.makedirs(output_dir, exist_ok=True)
@@ -539,12 +656,12 @@ def capture_full_page(url: str, subsidiary_code: str, mode: str) -> str:
                     "--disable-gpu",
                     "--disable-extensions",
                     "--start-maximized",
-                    "--force-device-scale-factor=2",  # 2× DPR → 3840px wide (4K)
+                    "--force-device-scale-factor=2",
                 ],
             )
             context = browser.new_context(
                 viewport=viewport,
-                device_scale_factor=2,  # Retina/4K quality without excessive file size
+                device_scale_factor=2,
                 user_agent=profile["user_agent"],
                 locale=profile["locale"],
                 timezone_id=profile["timezone"],
@@ -561,27 +678,33 @@ def capture_full_page(url: str, subsidiary_code: str, mode: str) -> str:
                     "Sec-Fetch-User": "?1",
                 },
             )
-            # Stealth: hide webdriver fingerprint
             context.add_init_script(_STEALTH_INIT_SCRIPT)
             page = context.new_page()
 
-            # Block known chat/analytics endpoints that trigger bot detection
             def _block_chat(route):
-                u = route.request.url.lower()
-                if any(k in u for k in ["genesys", "liveperson", "salesforceliveagent", "adobe-privacy", "chatbot", "proactive-chat"]):
+                request_url = route.request.url.lower()
+                if any(
+                    key in request_url
+                    for key in [
+                        "genesys",
+                        "liveperson",
+                        "salesforceliveagent",
+                        "adobe-privacy",
+                        "chatbot",
+                        "proactive-chat",
+                    ]
+                ):
                     route.abort()
                 else:
                     route.continue_()
+
             page.route("**/*", _block_chat)
 
             try:
-                # Mouse jitter before navigation to appear human
                 page.mouse.move(random.randint(0, 500), random.randint(0, 300))
-
-                response = page.goto(url, wait_until="domcontentloaded", timeout=120000)
+                response = page.goto(url, wait_until="load", timeout=120000)
                 status_code = response.status if response else None
 
-                # More mouse jitter after page load
                 page.mouse.move(random.randint(100, 800), random.randint(100, 600))
 
                 try:
@@ -593,48 +716,7 @@ def capture_full_page(url: str, subsidiary_code: str, mode: str) -> str:
                     pass
 
                 page_cleanup(page)
-
-                # Scroll in Python-controlled steps to trigger lazy-loaded sections.
-                # Cap at the initial height to avoid chasing dynamically injected content.
-                initial_height = page.evaluate("document.body.scrollHeight")
-                viewport_h = page.evaluate("window.innerHeight")
-                step = int(viewport_h * 0.8)
-                pos = 0
-                max_iterations = 40  # hard cap ~32 viewports
-                iterations = 0
-                while pos < initial_height and iterations < max_iterations:
-                    page.evaluate(f"window.scrollTo(0, {pos})")
-                    time.sleep(0.4)
-                    pos += step
-                    iterations += 1
-
-                # Wait for network requests triggered by scrolling to finish
-                try:
-                    page.wait_for_load_state("networkidle", timeout=25000)
-                except Exception:
-                    pass
-
-                # Force any remaining data-src / lazy images to load
-                page.evaluate("""
-                    () => {
-                        document.querySelectorAll('img').forEach(img => {
-                            img.loading = 'eager';
-                            if (img.dataset.src && !img.src) img.src = img.dataset.src;
-                            if (img.dataset.lazySrc) img.src = img.dataset.lazySrc;
-                        });
-                    }
-                """)
-
-                # Second networkidle after forcing lazy images
-                try:
-                    page.wait_for_load_state("networkidle", timeout=15000)
-                except Exception:
-                    pass
-
-
-                # Scroll back to top and wait for the page to settle before capture
-                page.evaluate("window.scrollTo(0, 0)")
-                time.sleep(3)
+                capture_height = _prime_page_for_capture(page)
 
                 if is_access_denied_page(page):
                     debug_base = os.path.join(debug_dir, f"{subsidiary_code}_{mode}_{profile['name']}_{timestamp}")
@@ -652,12 +734,16 @@ def capture_full_page(url: str, subsidiary_code: str, mode: str) -> str:
                         "This subsidiary may not have a prememberdays page."
                     )
 
-                # PNG is lossless; omit quality param (only applies to jpeg)
                 page.screenshot(
                     path=output_path,
-                    full_page=True,
                     type="png",
-                    scale="device",  # honours the 3× device_scale_factor
+                    scale="device",
+                    clip={
+                        "x": 0,
+                        "y": 0,
+                        "width": viewport["width"],
+                        "height": capture_height,
+                    },
                 )
                 return output_path
             except Exception as exc:
