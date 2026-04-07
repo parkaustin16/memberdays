@@ -336,11 +336,7 @@ def upload_to_cloudinary(file_path: str, subsidiary_code: str, mode: str) -> str
             err_body = resp.text
         raise RuntimeError(f"Cloudinary HTTP {resp.status_code}: {err_body}")
 
-    secure_url = resp.json().get("secure_url", "")
-    # Inject quality transformation so Cloudinary serves the image without lossy recompression
-    if secure_url and "/upload/" in secure_url:
-        secure_url = secure_url.replace("/upload/", "/upload/q_auto:best,fl_preserve_transparency/", 1)
-    return secure_url or None
+    return resp.json().get("secure_url")
 
 
 def save_to_airtable(
@@ -418,7 +414,7 @@ def capture_full_page(url: str, subsidiary_code: str, mode: str) -> str:
         sec_ch_ua_platform = '"Android"'
     else:
         viewport = {"width": 1920, "height": 1080}
-        device_scale_factor = 2
+        device_scale_factor = 1
         is_mobile = False
         user_agent = (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
