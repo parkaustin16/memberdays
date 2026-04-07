@@ -414,7 +414,7 @@ def capture_full_page(url: str, subsidiary_code: str, mode: str) -> str:
         sec_ch_ua_platform = '"Android"'
     else:
         viewport = {"width": 1920, "height": 1080}
-        device_scale_factor = 1
+        device_scale_factor = 2
         is_mobile = False
         user_agent = (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -544,6 +544,13 @@ def capture_full_page(url: str, subsidiary_code: str, mode: str) -> str:
                         transition-delay: 0s !important;
                         animation-delay: 0s !important;
                     }
+                    img, .cmp-carousel__item, .c-hero-banner {
+                        image-rendering: -webkit-optimize-contrast !important;
+                        image-rendering: crisp-edges !important;
+                        transform: translateZ(0) !important;
+                        backface-visibility: hidden !important;
+                        perspective: 1000px !important;
+                    }
                 `;
                 document.head.appendChild(style);
                 ['onetrust-banner-sdk', 'onetrust-pc-dark-filter'].forEach(id => {
@@ -556,7 +563,7 @@ def capture_full_page(url: str, subsidiary_code: str, mode: str) -> str:
         page.wait_for_timeout(300)
 
         # ── Full-page screenshot ──────────────────────────────────────────────
-        page.screenshot(path=output_path, full_page=True, type="png")
+        page.screenshot(path=output_path, full_page=True, type="png", scale="device")
 
         context.close()
         browser.close()
