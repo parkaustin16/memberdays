@@ -207,7 +207,7 @@ REGIONS = {
         ("fr", "France (FR)"),
         ("de", "Germany (DE)"),
         ("it", "Italy (IT)"),
-        ("br", "Belgium (BE)"),
+        ("be", "Belgium (BE)"),
         ("es", "Spain (ES)"),
         ("nl", "Netherlands (NL)"),
         ("cz", "Czech Republic (CZ)"),
