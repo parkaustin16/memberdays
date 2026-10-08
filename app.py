@@ -484,7 +484,9 @@ def capture_full_page(url: str, subsidiary_code: str, mode: str) -> str:
         # ── Human-like mouse jitter before navigation ─────────────────────────
         page.mouse.move(random.randint(0, 500), random.randint(0, 400))
 
-        page.goto(url, wait_until="domcontentloaded", timeout=90_000)
+        response = page.goto(url, wait_until="domcontentloaded", timeout=90_000)
+        if response and response.status >= 400:
+            raise RuntimeError(f"Page request failed with HTTP {response.status}.")
 
         # Additional jitter post-load
         page.mouse.move(random.randint(100, 800), random.randint(100, 600))
@@ -522,6 +524,51 @@ def capture_full_page(url: str, subsidiary_code: str, mode: str) -> str:
 
         page.evaluate("window.scrollTo(0, 0)")
         page.wait_for_timeout(500)
+
+        # Resolve lazy image sources and wait for loaded images to finish decoding.
+        page.evaluate("""
+            async () => {
+                const images = Array.from(document.images);
+                images.forEach(img => {
+                    img.loading = 'eager';
+                    const lazySrc = img.getAttribute('data-src')
+                        || img.getAttribute('data-lazy-src')
+                        || img.getAttribute('data-original');
+                    if (lazySrc && (!img.getAttribute('src') || img.src === location.href)) {
+                        img.src = lazySrc;
+                    }
+                    const lazySrcset = img.getAttribute('data-srcset')
+                        || img.getAttribute('data-lazy-srcset');
+                    if (lazySrcset && !img.getAttribute('srcset')) {
+                        img.srcset = lazySrcset;
+                    }
+                });
+                document.querySelectorAll('picture source').forEach(source => {
+                    const lazySrcset = source.getAttribute('data-srcset')
+                        || source.getAttribute('data-lazy-srcset');
+                    if (lazySrcset && !source.getAttribute('srcset')) {
+                        source.srcset = lazySrcset;
+                    }
+                });
+                await Promise.all(images.map(img => {
+                    const decode = () => img.decode ? img.decode().catch(() => {}) : Promise.resolve();
+                    if (img.complete) return decode();
+                    return new Promise(resolve => {
+                        const timeout = setTimeout(resolve, 5000);
+                        const finish = () => {
+                            clearTimeout(timeout);
+                            decode().finally(resolve);
+                        };
+                        img.addEventListener('load', finish, { once: true });
+                        img.addEventListener('error', () => {
+                            clearTimeout(timeout);
+                            resolve();
+                        }, { once: true });
+                    });
+                }));
+                if (document.fonts && document.fonts.ready) await document.fonts.ready;
+            }
+        """)
 
         # ── CSS cleanup: remove overlays, disable transitions ─────────────────
         page.evaluate("""
