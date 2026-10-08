@@ -255,7 +255,7 @@ def build_url_candidates(subsidiary_code: str) -> list[str]:
     # Per-subsidiary overrides (used as the first/only candidate)
     _overrides: dict[str, str] = {
         "co": "https://www.lg.com/co/lg-members-days-2026/",
-        "fr": "https://www.lg.com/fr/promotions/member-days",
+        "fr": "https://www.lg.com/fr/promotions/member-days/",
     }
     if subsidiary_code in _overrides:
         return [_overrides[subsidiary_code]]
@@ -487,7 +487,14 @@ def capture_full_page(url: str, subsidiary_code: str, mode: str) -> str:
 
         response = page.goto(url, wait_until="domcontentloaded", timeout=90_000)
         if response and response.status >= 400:
-            raise RuntimeError(f"Page request failed with HTTP {response.status}.")
+            try:
+                page_details = " ".join(page.locator("body").inner_text(timeout=2_000).split())[:300]
+            except Exception:
+                page_details = ""
+            detail = f" Response: {page_details}" if page_details else ""
+            raise RuntimeError(
+                f"Page request failed with HTTP {response.status} at {page.url}.{detail}"
+            )
 
         # Additional jitter post-load
         page.mouse.move(random.randint(100, 800), random.randint(100, 600))
