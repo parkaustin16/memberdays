@@ -255,6 +255,7 @@ def build_url_candidates(subsidiary_code: str) -> list[str]:
     # Per-subsidiary overrides (used as the first/only candidate)
     _overrides: dict[str, str] = {
         "co": "https://www.lg.com/co/lg-members-days-2026/",
+        "fr": "https://www.lg.com/fr/promotions/member-days",
     }
     if subsidiary_code in _overrides:
         return [_overrides[subsidiary_code]]
