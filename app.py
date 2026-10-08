@@ -476,6 +476,29 @@ def capture_full_page(url: str, subsidiary_code: str, mode: str) -> str:
 
         page.route("**/*", _block_unwanted)
 
+        def evaluate_after_navigation(script: str):
+            for attempt in range(3):
+                try:
+                    page.wait_for_function(
+                        "document.body !== null && document.readyState !== 'loading'",
+                        timeout=15_000,
+                    )
+                    return page.evaluate(script)
+                except Exception as exc:
+                    error_text = str(exc).lower()
+                    transient_error = (
+                        "execution context was destroyed" in error_text
+                        or "cannot read properties of null" in error_text
+                        or "timeout" in type(exc).__name__.lower()
+                    )
+                    if not transient_error or attempt == 2:
+                        raise
+                    try:
+                        page.wait_for_load_state("domcontentloaded", timeout=15_000)
+                    except Exception:
+                        pass
+                    page.wait_for_timeout(300)
+
         # ── Human-like mouse jitter before navigation ─────────────────────────
         page.mouse.move(random.randint(0, 500), random.randint(0, 400))
 
@@ -515,20 +538,20 @@ def capture_full_page(url: str, subsidiary_code: str, mode: str) -> str:
                 continue
 
         # ── Scroll through to trigger lazy-loaded images/components ──────────
-        total_height: int = page.evaluate("document.body.scrollHeight")
+        total_height: int = evaluate_after_navigation("document.body.scrollHeight")
         step = viewport["height"]
         pos = 0
         while pos < total_height:
             pos += step
-            page.evaluate(f"window.scrollTo(0, {pos})")
+            evaluate_after_navigation(f"window.scrollTo(0, {pos})")
             page.wait_for_timeout(150)
-            total_height = page.evaluate("document.body.scrollHeight")
+            total_height = evaluate_after_navigation("document.body.scrollHeight")
 
-        page.evaluate("window.scrollTo(0, 0)")
+        evaluate_after_navigation("window.scrollTo(0, 0)")
         page.wait_for_timeout(500)
 
         # Resolve lazy image sources and wait for loaded images to finish decoding.
-        page.evaluate("""
+        evaluate_after_navigation("""
             async () => {
                 const images = Array.from(document.images);
                 images.forEach(img => {
@@ -573,7 +596,7 @@ def capture_full_page(url: str, subsidiary_code: str, mode: str) -> str:
         """)
 
         # ── CSS cleanup: remove overlays, disable transitions ─────────────────
-        page.evaluate("""
+        evaluate_after_navigation("""
             () => {
                 const style = document.createElement('style');
                 style.innerHTML = `
